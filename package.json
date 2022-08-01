@@ -1,0 +1,25 @@
+{
+  "name": "api-key-manager-contract",
+  "version": "1.0.0",
+  "description": "A solidity contract that allows API users to trustlessly buy and manage their own API keys.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trmid/api-key-manager-contract.git"
+  },
+  "author": "Trevor Richard",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/trmid/api-key-manager-contract/issues"
+  },
+  "homepage": "https://github.com/trmid/api-key-manager-contract#readme",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^1.0.2",
+    "@types/mocha": "^9.1.1",
+    "chai": "^4.3.6",
+    "hardhat": "^2.10.1"
+  }
+}
