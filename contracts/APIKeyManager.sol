@@ -126,6 +126,12 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     return _usedBalance;
   }
 
+  function acceptPayment(uint256 _amount) internal {
+    uint256 _allowance = IERC20(erc20).allowance(_msgSender(), address(this));
+    require(_allowance >= _amount, "APIKeyManager: low token allowance");
+    IERC20(erc20).transferFrom(_msgSender(), address(this), _amount);
+  }
+
   /****************************************
    * Public Functions
    ****************************************/
@@ -221,7 +227,11 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     // Get target tier price:
     uint256 _tierPrice = tierPrice(_tierId);
 
-    // TODO: accept erc20 payment for _msDuration * _tierPrice;
+    // Accept erc20 payment for _tierPrice * _msDuration:
+    uint256 _amount = _tierPrice * _msDuration;
+    if(_amount > 0) {
+      acceptPayment(_amount);
+    }
 
     // Initialize Key:
     keyDef[_keyHash].expiryTime = block.timestamp + _msDuration;
@@ -239,7 +249,11 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     // Get target tier price:
     uint256 _tierPrice = tierPrice(_tierId);
 
-    // TODO: accept erc20 payment for _msDuration * _tierPrice;
+    // Accept erc20 payment for _tierPrice * _msDuration:
+    uint256 _amount = _tierPrice * _msDuration;
+    if(_amount > 0) {
+      acceptPayment(_amount);
+    }
 
     // Extend the expiry time:
     if(isKeyActive(_keyHash)) {
@@ -254,10 +268,11 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     uint256 _remainingBalance = remainingBalance(_keyHash);
     require(_remainingBalance > 0, "APIKeyManager: no balance");
 
-    // TODO: send erc20 payment to owner
-
     // Expire key:
     keyDef[_keyHash].expiryTime = block.timestamp;
+
+    // Send erc20 payment to owner:
+    IERC20(erc20).transfer(_msgSender(), _remainingBalance);
   }
 
   function addTier(uint256 _price) external onlyOwner {
@@ -270,10 +285,10 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     tier[_tierId].active = false;
   }
 
-  function withdraw() external nonReentrant() onlyOwner nonReentrant() {
-    // TODO: Send erc20 balance to owner
-
+  function withdraw() external nonReentrant() onlyOwner {
+    uint256 _balance = availableWithdrawal();
     lastWithdrawal = block.timestamp;
+    IERC20(erc20).transfer(owner(), _balance);
   }
 
 }
