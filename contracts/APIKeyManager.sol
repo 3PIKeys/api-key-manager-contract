@@ -5,9 +5,6 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-// Import this file to use console.log
-import "hardhat/console.sol";
-
 contract APIKeyManager is Ownable, ReentrancyGuard {
 
   /****************************************
