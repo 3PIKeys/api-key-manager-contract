@@ -249,7 +249,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     }
   }
 
-  function deactivateKey(bytes32 _keyHash) external nonReentrant() {
+  function deactivateKey(bytes32 _keyHash) external _keyExists(_keyHash) nonReentrant() {
     require(ownerOf(_keyHash) == _msgSender(), "APIKeyManager: not owner");
     uint256 _remainingBalance = remainingBalance(_keyHash);
     require(_remainingBalance > 0, "APIKeyManager: no balance");
