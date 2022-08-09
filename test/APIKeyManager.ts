@@ -17,12 +17,13 @@ describe("APIKeyManager", () => {
     const APIKeyManager = await ethers.getContractFactory("APIKeyManager");
     const keyManager = await APIKeyManager.deploy(erc20Address);
     await keyManager.deployed();
-    return { keyManager, owner, account1, account2 };
+    return { keyManager, owner, account1, account2, erc20Address };
   };
 
   describe("Deployment", function () {
     it("Should set the right ERC20 token address", async () => {
-      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyManager, erc20Address } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.erc20()).to.equal(erc20Address);
     });
   });
 
