@@ -1,16 +1,25 @@
-# api-key-manager-contract
+# API Key Manager Contract
+
 A solidity contract that allows API users to trustlessly buy and manage their own API keys.
 
-## Sample Hardhat Project
+Our deployment-ready API Key Management Contract is EVM compatible and written in Solidity, with a security-first approach following industry best practices. Once deployed, this contract acts as the decentralized key validation authority all while seamlessly processing client subscription payments.
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, and a script that deploys that contract.
+## Install
 
-Try running some of the following tasks:
+Install the project dependencies with `npm i`.
 
-```shell
-npx hardhat help
-npx hardhat test
-GAS_REPORT=true npx hardhat test
-npx hardhat node
+## Deployment
+
+Deploy the contract by adding the target network to hardhat.config.ts and running:
+```
 npx hardhat run scripts/deploy.ts
+```
+
+*The APIKeyManager.sol contract is functional, but still under development and not fully tested. Please use caution when deploying to live environments.*
+
+## Testing
+
+Run available tests for the contract code with the following:
+```
+npx hardhat test
 ```

@@ -7,8 +7,8 @@ if(!deployKey) throw new Error("missing deploy key in environment vars");
 const config: HardhatUserConfig = {
   solidity: "0.8.9",
   networks: {
-    fuji: {
-      url: "https://api.avax-test.network/ext/bc/C/rpc",
+    goerli: {
+      url: "https://rpc.ankr.com/eth_goerli",
       accounts: [deployKey]
     }
   }
