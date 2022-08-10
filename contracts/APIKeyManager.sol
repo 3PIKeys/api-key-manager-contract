@@ -91,7 +91,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * Modifiers
    ****************************************/
   modifier _keyExists(bytes32 _keyHash) {
-    require(!keyExists(_keyHash), "APIKeyManager: key does not exist");
+    require(keyExists(_keyHash), "APIKeyManager: key does not exist");
     _;
   }
 
