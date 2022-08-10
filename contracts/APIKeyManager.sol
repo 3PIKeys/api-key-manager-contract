@@ -288,4 +288,11 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     IERC20(erc20).transfer(owner(), _balance);
   }
 
+  function transfer(bytes32 _keyHash, address _to) external _keyExists(_keyHash) nonReentrant() {
+    require(ownerOf(_keyHash) == _msgSender(), "APIKeyManager: not owner");
+    keyCount[ownerOf(_keyHash)]--;
+    keyCount[_to]++;
+    keyDef[_keyHash].owner = _to;
+  }
+
 }
