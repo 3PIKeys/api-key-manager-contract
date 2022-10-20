@@ -27,18 +27,13 @@ describe("APIKeyManager", () => {
   };
   const deployAPIKeyManagerWithTiers = async () => {
     const res = await deployAPIKeyManager();
-    const tierPrices = [1, 5, 10, 100];
+    const tierPrices = [0, 1, 5, 10, 100];
     for(const price of tierPrices) {
       await (await res.keyManager.addTier(ethers.BigNumber.from(price))).wait();
     }
     return { ...res, tierPrices };
   };
   const getRandomKeySet = () => {
-    // Create new key bytes:
-    // const privateKey: Uint8Array = new Uint8Array(32);
-    // for(let i = 0; i < privateKey.length; i++) {
-    //   privateKey[i] = Math.floor(Math.random() * 16);
-    // }
     const privateKey = ethers.utils.randomBytes(32);
 
     // Hash key:
@@ -56,6 +51,7 @@ describe("APIKeyManager", () => {
   });
 
   describe("activateKey(...)", () => {
+
     it("Should activate a valid key with correct payment", async () => {
       const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
       
@@ -74,12 +70,13 @@ describe("APIKeyManager", () => {
       await (await keyManager.connect(otherAccounts[0]).activateKey(keyHash, keyDuration, tierId)).wait();
       expect(await keyManager.isKeyActive(keyHash)).to.be.true;
     });
+
     it("Should revert if allowance is too low", async () => {
       const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
 
       // Get payable amount:
       const keyDuration = 1000 * 60 * 60; // 1 hour
-      const tierId = 0;
+      const tierId = 1;
       const payable = tierPrices[tierId] * keyDuration;
       expect(payable).to.be.greaterThan(0);
 
@@ -90,8 +87,9 @@ describe("APIKeyManager", () => {
       const { keyHash } = getRandomKeySet();
 
       // Activate key:
-      await expect(keyManager.connect(otherAccounts[0]).activateKey(keyHash, keyDuration, tierId)).to.be.revertedWith("APIKeyManager: low token allowance");
+      await expect(keyManager.connect(otherAccounts[0]).activateKey(keyHash, keyDuration, tierId)).to.be.revertedWith("APIKM: low token allowance");
     });
+
   });
 
   describe("extendKey(...)", async () => {
@@ -124,47 +122,228 @@ describe("APIKeyManager", () => {
       const addedDuration = 1000 * 60 * 30; // 30 min
       const payable2 = ethers.BigNumber.from(tierPrices[0]).mul(addedDuration);
       await (await erc20.connect(otherAccounts[0]).approve(keyManager.address, payable2)).wait();
-      await expect(keyManager.connect(otherAccounts[0]).extendKey(keyHash, addedDuration)).to.be.revertedWith("APIKeyManager: key does not exist");
+      await expect(keyManager.connect(otherAccounts[0]).extendKey(keyHash, addedDuration)).to.be.revertedWith("APIKM: key does not exist");
     });
   });
 
-  // describe("withdraw()", function() {
-  //   this.timeout(1000 * 1000);
-  //   it("Should cost a reasonable amount of gas at 1 thousand active keys", async () => {
-  //     const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+  describe("withdrawUsedBalances(...)", function() {
+    this.timeout(1000 * 1000);
 
-  //     // Authorize all payments:
-  //     (await erc20.connect(owner).approve(keyManager.address, ethers.constants.MaxUint256)).wait();
+    it("Should reject if no key hashes are provided.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      await expect(keyManager.connect(owner).withdrawUsedBalances([])).to.be.rejectedWith("APIKM: zero hashes");
+    });
 
-  //     // Create 1 thousand active keys with pseudo-random payment periods within 100 second
-  //     const numKeys = 2_000;
-  //     const promises: Promise<any>[] = [];
-  //     for(let i = 0; i < numKeys; i++) {
-  //       const keyDuration = Math.floor(Math.random() * 1000 * 100); // 0 - 100 seconds
-  //       const tierId = Math.floor(Math.random() * tierPrices.length);
-  //       promises.push(keyManager.connect(owner).activateKey(getRandomKeySet().keyHash, keyDuration, tierId));
-  //     }
-  //     console.log("Sent all key activation transactions");
-  //     await Promise.all(promises);
-  //     console.log("All key activations complete");
+    it("Should reject if there is nothing to withdraw.", async () => {
+      const { keyManager, owner, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
 
-  //     // Check numKeys:
-  //     expect(await keyManager.numKeys()).to.equal(numKeys);
+      // Activate free-tier key:
+      expect(tierPrices[0]).to.equal(0);
+      const { keyHash } = getRandomKeySet();
+      await keyManager.connect(owner).activateKey(keyHash, 1_000_000, 0);
+
+      // Try to withdraw zero balance:
+      await expect(keyManager.connect(owner).withdrawUsedBalances([keyHash])).to.be.rejectedWith("APIKM: no balance");
+    });
+
+    it("Should not allow a withdrawal from an address that is not owner", async () => {
+      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      await expect(keyManager.connect(otherAccounts[0]).withdrawUsedBalances([])).to.be.rejectedWith("Ownable: caller is not the owner");
+    });
+
+    it("Should withdraw an amount equal to the amount of seconds passed since the last withdrawal per key multiplied by the tier price.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Calculate payable amount:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const keyDuration = 60; // 1 min
+      const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
+      expect(payable).to.be.greaterThan(0);
+
+      // Activate the key:
+      const controller = otherAccounts[0];
+      const { keyHash } = getRandomKeySet();
+      await erc20.connect(controller).approve(keyManager.address, payable);
+      const activateRes = await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
+      const activateTimestamp = (await keyManager.provider.getBlock((await activateRes.wait()).blockNumber)).timestamp;
+
+      // Wait for 2 seconds:
+      await new Promise((resolve) => {
+        setTimeout(resolve, 2000);
+      });
+
+      // Get owner balance before withdrawal:
+      const ownerBalanceBefore = await erc20.balanceOf(owner.address);
+
+      // Withdraw the used key balance:
+      const withdrawRes = await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
+      const withdrawTimestamp = (await keyManager.provider.getBlock((await withdrawRes.wait()).blockNumber)).timestamp;
       
-  //     // Wait for 1 second:
-  //     await new Promise((resolve) => {
-  //       setTimeout(resolve, 1000);
-  //     });
-  //     console.log("Waited for 1 sec");
+      // Calculate the withdrawn amount:
+      const activeDuration = withdrawTimestamp - activateTimestamp;
+      const expectedWithdrawal = ethers.BigNumber.from(activeDuration).mul(tierPrices[tierId]);
 
-  //     // Withdraw available funds:
-  //     const res = await keyManager.connect(owner).withdraw();
-  //     console.log(res);
-  //     const waitRes = await res.wait();
-  //     console.log(waitRes);
-  //     expect(waitRes.gasUsed).to.be.lessThan(100_000);
+      // Check if it matches the actual amount withdrawn:
+      const ownerBalanceAfter = await erc20.balanceOf(owner.address);
+      expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(expectedWithdrawal);
+    });
 
-  //   });
-  // });
+    it("Should withdraw the full amount originally deposited for a key when it is expired.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Calculate payable amount:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const keyDuration = 2; // 2 seconds
+      const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
+      expect(payable).to.be.greaterThan(0);
+
+      // Activate the key:
+      const controller = otherAccounts[0];
+      const { keyHash } = getRandomKeySet();
+      await erc20.connect(controller).approve(keyManager.address, payable);
+      await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
+
+      // Wait for 1 second more than the key duration:
+      await new Promise((resolve) => {
+        setTimeout(resolve, 1000 * (keyDuration + 1));
+      });
+
+      // Get owner balance before withdrawal:
+      const ownerBalanceBefore = await erc20.balanceOf(owner.address);
+
+      // Withdraw the used key balance:
+      await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
+
+      // Check if payable amount matches the actual amount withdrawn:
+      const ownerBalanceAfter = await erc20.balanceOf(owner.address);
+      expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(payable);
+    });
+
+    it("Should withdraw the full amount originally deposited for a key when withdrawing multiple times over and beyond the key's lifetime.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Calculate payable amount:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const keyDuration = 5; // 5 seconds
+      const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
+      expect(payable).to.be.greaterThan(0);
+
+      // Activate the key:
+      const controller = otherAccounts[0];
+      const { keyHash } = getRandomKeySet();
+      await erc20.connect(controller).approve(keyManager.address, payable);
+      await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
+      const localTxTime = Date.now();
+
+      // Get owner balance before withdrawal:
+      const ownerBalanceBefore = await erc20.balanceOf(owner.address);
+
+      // Withdraw repeatedly until key is expired:
+      const expiry = localTxTime + keyDuration * 1000;
+      let withdrawals = 0;
+      while(Date.now() < expiry) {
+        try {
+          await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
+          withdrawals++;
+        } catch(err) {
+          if(err instanceof Error && err.message.match("APIKM: no balance")) {
+            break;
+          } else {
+            throw err;
+          }
+        }
+      }
+      expect(withdrawals).to.be.greaterThan(1);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+
+      // Check if payable amount matches the total amount withdrawn:
+      const ownerBalanceAfter = await erc20.balanceOf(owner.address);
+      expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(payable);
+    });
+
+    it("Should allow 255 hashes to be withdrawn from, but reject if asking for more.", async () => {
+      const { keyManager, owner, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Ensure the tier we will be using has a price:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+
+      // Authorize all payments for the erc20 token:
+      (await erc20.connect(owner).approve(keyManager.address, ethers.constants.MaxUint256)).wait();
+
+      // Activate 255 keys:
+      const maxKeys = 255;
+      const keyHashes: string[] = [];
+      const promises: Promise<any>[] = [];
+      for(let i = 0; i < maxKeys; i++) {
+        const keyDuration = 1_000_000;
+        const keyHash = getRandomKeySet().keyHash;
+        keyHashes.push(keyHash);
+        promises.push(keyManager.connect(owner).activateKey(keyHash, keyDuration, tierId));
+      }
+      await Promise.all(promises);
+
+      // Wait for 1 second:
+      await new Promise((resolve) => {
+        setTimeout(resolve, 1000);
+      });
+
+      // Ensure keyHashes.length is equal to maxKeys:
+      expect(keyHashes.length).to.equal(maxKeys);
+
+      // Withdraw available funds:
+      await expect(keyManager.connect(owner).withdrawUsedBalances(keyHashes)).to.not.be.rejected;
+
+      // Activate one more key and add it to the hash list:
+      const keyDuration = 1_000_000;
+      const keyHash = getRandomKeySet().keyHash;
+      keyHashes.push(keyHash);
+      await keyManager.connect(owner).activateKey(keyHash, keyDuration, tierId);
+
+      // Try to withdraw funds with additional key:
+      await expect(keyManager.connect(owner).withdrawUsedBalances(keyHashes)).to.be.revertedWith("APIKM: too many hashes");
+    });
+
+    it("Should cost a reasonable amount of gas to withdraw from 100 keys (subjective)", async () => {
+      const { keyManager, owner, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Ensure at least one payed tier is active:
+      expect(tierPrices.length).to.be.greaterThan(0);
+      expect(Math.max(...tierPrices)).to.be.greaterThan(0);
+
+      // Authorize all payments for the erc20 token:
+      (await erc20.connect(owner).approve(keyManager.address, ethers.constants.MaxUint256)).wait();
+
+      // Create 1 hundred active keys with pseudo-random payment periods under 100 second
+      const numKeys = 100;
+      const promises: Promise<any>[] = [];
+      const keyHashes: string[] = [];
+      for(let i = 0; i < numKeys; i++) {
+        const keyDuration = Math.floor(Math.random() * 1000 * 100); // 0 - 100 seconds
+        const tierId = Math.floor(Math.random() * tierPrices.length); // random tier ID
+        const keyHash = getRandomKeySet().keyHash;
+        keyHashes.push(keyHash);
+        promises.push(keyManager.connect(owner).activateKey(keyHash, keyDuration, tierId));
+      }
+      await Promise.all(promises);
+
+      // Check numKeys:
+      expect(await keyManager.numKeys()).to.equal(numKeys);
+      
+      // Wait for 1 second:
+      await new Promise((resolve) => {
+        setTimeout(resolve, 1000);
+      });
+
+      // Withdraw available funds:
+      const res = await keyManager.connect(owner).withdrawUsedBalances(keyHashes);
+      const waitRes = await res.wait();
+      expect(waitRes.gasUsed).to.be.lessThan(numKeys * 20_000);
+
+    });
+  });
 
 });
