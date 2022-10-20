@@ -88,12 +88,12 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * Modifiers
    ****************************************/
   modifier _keyExists(bytes32 keyHash) {
-    require(keyExists(keyHash), "APIKeyManager: key does not exist");
+    require(keyExists(keyHash), "APIKM: key does not exist");
     _;
   }
 
   modifier _tierExists(uint64 tierId) {
-    require(tierId < _currentTierId, "APIKeyManager: tier does not exist");
+    require(tierId < _currentTierId, "APIKM: tier does not exist");
     _;
   }
 
@@ -101,7 +101,10 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * Internal Functions
    ****************************************/
 
-  /** @dev Calculate the used balance available for withdrawal for a given key at a timestamp */
+  /**
+    @dev Calculate the used balance available for withdrawal 
+    for a given key at a timestamp.
+  */
   function usedBalance(bytes32 keyHash, uint256 timestamp) internal view _keyExists(keyHash) returns(uint256) {
     uint256 lastWithdrawal = _keyDef[keyHash].lastWithdrawal;
     uint256 expiryTime = _keyDef[keyHash].expiryTime;
@@ -122,39 +125,69 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     return _usedBalance;
   }
 
+  /**
+    @dev Accepts an ERC20 payment for the given amount from
+    the message sender if the allowance permits.
+  */
   function acceptPayment(uint256 amount) internal {
     uint256 _allowance = IERC20(erc20).allowance(_msgSender(), address(this));
-    require(_allowance >= amount, "APIKeyManager: low token allowance");
+    require(_allowance >= amount, "APIKM: low token allowance");
     IERC20(erc20).transferFrom(_msgSender(), address(this), amount);
   }
 
   /****************************************
    * Public Functions
    ****************************************/
+
+  /**
+    @dev Checks if the given tier is active.
+  */
   function isTierActive(uint64 tierId) public view _tierExists(tierId) returns(bool) {
     return _tier[tierId].active;
   }
 
+  /**
+    @dev Returns the price of a given tier.
+  */
   function tierPrice(uint64 tierId) public view _tierExists(tierId) returns(uint256) {
     return _tier[tierId].price;
   }
   
+  /**
+    @dev Returns the current number of tiers.
+    (active and archived)
+  */
   function numTiers() public view returns(uint64) {
     return _currentTierId;
   }
 
+  /**
+    @dev Returns the current number of keys created.
+    (active and not active)
+  */
   function numKeys() public view returns(uint256) {
     return _currentKeyId;
   }
 
+  /**
+    @dev Checks if the key with the given hash has been activated
+    at any point.
+  */
   function keyExists(bytes32 keyHash) public view returns(bool) {
     return _keyDef[keyHash].owner != address(0);
   }
 
+  /**
+    @dev Determines if the key with the given hash is active.
+  */
   function isKeyActive(bytes32 keyHash) public view _keyExists(keyHash) returns(bool) {
     return _keyDef[keyHash].expiryTime > block.timestamp;
   }
 
+  /**
+    @dev Calculates the remaining balance for the key with the
+    given hash.
+  */
   function remainingBalance(bytes32 keyHash) public view _keyExists(keyHash) returns(uint256) {
     if(!isKeyActive(keyHash)) {
       return 0;
@@ -164,12 +197,18 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     }
   }
 
+  /**
+    @dev Returns the key info for the given hash.
+  */
   function keyInfo(bytes32 keyHash) public view _keyExists(keyHash) returns(KeyDef memory) {
     return _keyDef[keyHash];
   }
 
+  /**
+    @dev Returns the used balances available for withdrawal for
+    the keys with the given hashes at the given timestamp.
+  */
   function usedBalances(bytes32[] calldata keyHashes, uint256 timestamp) public view returns(uint256) {
-    require(keyHashes.length <= MAX_UINT8, "APIKeyManager: too many hashes");
     uint256 balance = 0;
     for(uint8 i = 0; i < uint8(keyHashes.length); i++) {
       balance += usedBalance(keyHashes[i], timestamp);
@@ -181,13 +220,13 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * External Functions
    ****************************************/
 
-  function tierIdOf(bytes32 keyHash) external view _keyExists(keyHash) returns(uint64) {
-    return _keyDef[keyHash].tierId;
-  }
-
+  /**
+    @dev Activates a new key with the given hash. Accepts payment
+    for the initial duration at the target tier price.
+  */
   function activateKey(bytes32 keyHash, uint256 msDuration, uint64 tierId) external nonReentrant() {
-    require(!keyExists(keyHash), "APIKeyManager: key exists");
-    require(isTierActive(tierId), "APIKeyManager: inactive tier");
+    require(!keyExists(keyHash), "APIKM: key exists");
+    require(isTierActive(tierId), "APIKM: inactive tier");
 
     // Get target tier price:
     uint256 _tierPrice = tierPrice(tierId);
@@ -210,10 +249,14 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     emit ActivateKey(keyHash, _msgSender());
   }
 
+  /**
+    @dev Extends the lifetime of a key by accepting a new
+    deposit to the key balance.
+  */
   function extendKey(bytes32 keyHash, uint256 msDuration) external _keyExists(keyHash) nonReentrant() {
-    require(_keyDef[keyHash].owner == _msgSender(), "APIKeyManager: not owner");
+    require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
     uint64 tierId = _keyDef[keyHash].tierId;
-    require(isTierActive(tierId), "APIKeyManager: inactive tier");
+    require(isTierActive(tierId), "APIKM: inactive tier");
 
     // Get target tier price:
     uint256 _tierPrice = tierPrice(tierId);
@@ -232,10 +275,14 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     }
   }
 
+  /**
+    @dev Deactivates a key and returns the unused balance to 
+    the key owner.
+  */
   function deactivateKey(bytes32 keyHash) external _keyExists(keyHash) nonReentrant() {
-    require(_keyDef[keyHash].owner == _msgSender(), "APIKeyManager: not owner");
+    require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
     uint256 _remainingBalance = remainingBalance(keyHash);
-    require(_remainingBalance > 0, "APIKeyManager: no balance");
+    require(_remainingBalance > 0, "APIKM: no balance");
 
     // Expire key:
     _keyDef[keyHash].expiryTime = block.timestamp;
@@ -244,6 +291,9 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     IERC20(erc20).transfer(_msgSender(), _remainingBalance);
   }
 
+  /**
+    @dev Appends a new tier with the given price.
+  */
   function addTier(uint256 price) external onlyOwner {
     uint64 tierId = _currentTierId++;
     _tier[tierId].price = price;
@@ -251,11 +301,18 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     emit AddTier(tierId, price);
   }
 
+  /**
+    @dev Archives the given tier. This tier will no longer be
+    available for key creation or renewal.
+  */
   function archiveTier(uint64 tierId) external onlyOwner _tierExists(tierId) {
     _tier[tierId].active = false;
     emit ArchiveTier(tierId);
   }
 
+  /**
+    @dev Returns the total used balances available for withdrawal.
+  */
   function allUsedBalances(uint256 timestamp) external view returns(uint256) {
     uint256 _numKeys = numKeys();
     uint256 balance = 0;
@@ -265,8 +322,17 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     return balance;
   }
 
+  /**
+    @dev Withdraws the used balances of the given keyHashes.
+    Limitations are in place to prevent too many withdrawals
+    at once since the usedBalances(...) function is gas-heavy.
+  */
   function withdrawUsedBalances(bytes32[] calldata keyHashes) external nonReentrant() onlyOwner {
-    IERC20(erc20).transfer(owner(), usedBalances(keyHashes, block.timestamp));
+    require(keyHashes.length > 0, "APIKM: zero hashes");
+    require(keyHashes.length <= MAX_UINT8, "APIKM: too many hashes");
+    uint256 balance = usedBalances(keyHashes, block.timestamp);
+    require(balance > 0, "APIKM: no balance");
+    IERC20(erc20).transfer(owner(), balance);
   }
 
 }
