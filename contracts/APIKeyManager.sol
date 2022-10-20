@@ -13,15 +13,15 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * Structs
    ****************************************/
   struct KeyDef {
-    uint256 startTime;  // ms
-    uint256 expiryTime; // ms
-    uint256 lastWithdrawal; // ms
+    uint256 startTime;  // seconds
+    uint256 expiryTime; // seconds
+    uint256 lastWithdrawal; // seconds
     address owner;
     uint64 tierId;
   }
 
   struct Tier {
-    uint256 price; // price per millisecond
+    uint256 price; // price per second
     bool active;
   }
 
@@ -69,6 +69,15 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    * Maps the Key ID to the key hash.
    ****************************************/
   mapping(uint256 => bytes32) private _keyHash;
+
+  /****************************************
+   * Address to Key Hash Map
+   ****************************************
+   * @dev
+   * Maps an address to the key hashes that
+   * it controls.
+   ****************************************/
+  mapping(address => bytes32[]) private _addressKeyHashes;
 
   /****************************************
    * Current Key Id
@@ -205,15 +214,11 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
-    @dev Returns the used balances available for withdrawal for
-    the keys with the given hashes at the given timestamp.
+    @dev Returns the key hash for the given key ID.
   */
-  function usedBalances(bytes32[] calldata keyHashes, uint256 timestamp) public view returns(uint256) {
-    uint256 balance = 0;
-    for(uint8 i = 0; i < uint8(keyHashes.length); i++) {
-      balance += usedBalance(keyHashes[i], timestamp);
-    }
-    return balance;
+  function keyHashOf(uint256 keyId) public view returns(bytes32) {
+    require(keyId < _currentKeyId, "APIKM: nonexistent keyId");
+    return _keyHash[keyId];
   }
 
   /****************************************
@@ -221,29 +226,39 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
    ****************************************/
 
   /**
+    @dev Returns an array of key hashes controlled by the given address.
+  */
+  function keyHashesOf(address controller) external view returns(bytes32[] memory) {
+    return _addressKeyHashes[controller];
+  }
+
+  /**
     @dev Activates a new key with the given hash. Accepts payment
     for the initial duration at the target tier price.
   */
-  function activateKey(bytes32 keyHash, uint256 msDuration, uint64 tierId) external nonReentrant() {
+  function activateKey(bytes32 keyHash, uint256 secDuration, uint64 tierId) external nonReentrant() {
     require(!keyExists(keyHash), "APIKM: key exists");
     require(isTierActive(tierId), "APIKM: inactive tier");
 
     // Get target tier price:
     uint256 _tierPrice = tierPrice(tierId);
 
-    // Accept erc20 payment for _tierPrice * msDuration:
-    uint256 _amount = _tierPrice * msDuration;
+    // Accept erc20 payment for _tierPrice * secDuration:
+    uint256 _amount = _tierPrice * secDuration;
     if(_amount > 0) {
       acceptPayment(_amount);
     }
 
     // Initialize Key:
     _keyHash[_currentKeyId++] = keyHash;
-    _keyDef[keyHash].expiryTime = block.timestamp + msDuration;
+    _keyDef[keyHash].expiryTime = block.timestamp + secDuration;
     _keyDef[keyHash].startTime = block.timestamp;
     _keyDef[keyHash].lastWithdrawal = block.timestamp;
     _keyDef[keyHash].tierId = tierId;
     _keyDef[keyHash].owner = _msgSender();
+
+    // Append key hash to address control list:
+    _addressKeyHashes[_msgSender()].push(keyHash);
 
     // Emit Transfer event:
     emit ActivateKey(keyHash, _msgSender());
@@ -253,7 +268,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     @dev Extends the lifetime of a key by accepting a new
     deposit to the key balance.
   */
-  function extendKey(bytes32 keyHash, uint256 msDuration) external _keyExists(keyHash) nonReentrant() {
+  function extendKey(bytes32 keyHash, uint256 secDuration) external _keyExists(keyHash) nonReentrant() {
     require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
     uint64 tierId = _keyDef[keyHash].tierId;
     require(isTierActive(tierId), "APIKM: inactive tier");
@@ -261,17 +276,17 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     // Get target tier price:
     uint256 _tierPrice = tierPrice(tierId);
 
-    // Accept erc20 payment for _tierPrice * msDuration:
-    uint256 _amount = _tierPrice * msDuration;
+    // Accept erc20 payment for _tierPrice * secDuration:
+    uint256 _amount = _tierPrice * secDuration;
     if(_amount > 0) {
       acceptPayment(_amount);
     }
 
     // Extend the expiry time:
     if(isKeyActive(keyHash)) {
-      _keyDef[keyHash].expiryTime += msDuration;
+      _keyDef[keyHash].expiryTime += secDuration;
     } else {
-      _keyDef[keyHash].expiryTime = block.timestamp + msDuration;
+      _keyDef[keyHash].expiryTime = block.timestamp + secDuration;
     }
   }
 
@@ -311,7 +326,21 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
-    @dev Returns the total used balances available for withdrawal.
+    @dev Returns the used balances available for withdrawal for
+    the keys with the given hashes at the given timestamp.
+    (does not check for duplicate keys)
+  */
+  function usedBalances(bytes32[] calldata keyHashes, uint256 timestamp) external view returns(uint256) {
+    uint256 balance = 0;
+    for(uint8 i = 0; i < uint8(keyHashes.length); i++) {
+      balance += usedBalance(keyHashes[i], timestamp);
+    }
+    return balance;
+  }
+
+  /**
+    @dev Returns the total used balances available for withdrawal
+    at the given timestamp.
   */
   function allUsedBalances(uint256 timestamp) external view returns(uint256) {
     uint256 _numKeys = numKeys();
@@ -330,7 +359,15 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   function withdrawUsedBalances(bytes32[] calldata keyHashes) external nonReentrant() onlyOwner {
     require(keyHashes.length > 0, "APIKM: zero hashes");
     require(keyHashes.length <= MAX_UINT8, "APIKM: too many hashes");
-    uint256 balance = usedBalances(keyHashes, block.timestamp);
+    uint256 balance = 0;
+    for(uint256 i = 0; i < keyHashes.length; i++) {
+
+      // Add used balance of account:
+      balance += usedBalance(keyHashes[i], block.timestamp);
+
+      // Set last withdrawal for account (prevents duplicate withdrawals):
+      _keyDef[keyHashes[i]].lastWithdrawal = block.timestamp;
+    }
     require(balance > 0, "APIKM: no balance");
     IERC20(erc20).transfer(owner(), balance);
   }
