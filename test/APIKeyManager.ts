@@ -50,6 +50,78 @@ describe("APIKeyManager", () => {
     });
   });
 
+  describe("keyHashesOf(...)", function() {
+    this.timeout(1000 * 1000);
+
+    it("Should return an empty array for a controller with no keys.", async () => {
+      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.keyHashesOf(otherAccounts[0].address)).to.have.lengthOf(0);
+    });
+
+    it("Should return an array containing only the keys for one controller.", async () => {
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      
+      // Init 3 random keys for all other accounts:
+      const controllerMap = new Map<string, string[]>();
+      for(const controller of otherAccounts) {
+        for(let i = 0; i < 3; i++) {
+          const { keyHash } = getRandomKeySet();
+          const duration = Math.floor(Math.random() * 1_000); // 0-1000 seconds
+          const tierId = Math.floor(Math.random() * tierPrices.length);
+          const payable = ethers.BigNumber.from(duration).mul(tierPrices[tierId]);
+          await erc20.connect(controller).approve(keyManager.address, payable);
+          await keyManager.connect(controller).activateKey(keyHash, duration, tierId);
+          let hashes = controllerMap.get(controller.address);
+          if(!hashes) {
+            hashes = [];
+            controllerMap.set(controller.address, hashes);
+          }
+          hashes.push(keyHash);
+        }
+      }
+
+      // Check the keyHashes of each controller on-chain:
+      for(const controller of otherAccounts) {
+        const expectedHashes = controllerMap.get(controller.address);
+        if(!expectedHashes) throw new Error(`missing hashes for controller: ${controller.address}`);
+        const hashSet = new Set(expectedHashes);
+        const actualHashes = await keyManager.keyHashesOf(controller.address);
+        expect(actualHashes.length).to.equal(expectedHashes.length);
+        for(const hash of actualHashes) {
+          expect(hashSet.has(hash)).to.be.true;
+        }
+      }
+    });
+
+    it("Should include both active and not active keyHashes.", async () => {
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Deploy two keys:
+      const keyHashes = [getRandomKeySet().keyHash, getRandomKeySet().keyHash];
+      const controller = otherAccounts[0];
+      const duration = 100; // 100 seconds
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const payable = ethers.BigNumber.from(duration).mul(tierPrices[tierId]);
+      await erc20.connect(controller).approve(keyManager.address, payable.mul(2));
+      await keyManager.connect(controller).activateKey(keyHashes[0], duration, tierId);
+      await keyManager.connect(controller).activateKey(keyHashes[1], duration, tierId);
+
+      // Deactivate the second:
+      await keyManager.connect(controller).deactivateKey(keyHashes[1]);
+      expect(await keyManager.isKeyActive(keyHashes[0])).to.be.true;
+      expect(await keyManager.isKeyActive(keyHashes[1])).to.be.false;
+
+      // Check if both keys are included in array:
+      const actualHashes = await keyManager.keyHashesOf(controller.address);
+      expect(actualHashes).to.have.lengthOf(keyHashes.length);
+      for(const hash of keyHashes) {
+        expect(actualHashes).to.include(hash);
+      }
+    });
+
+  });
+
   describe("activateKey(...)", () => {
 
     it("Should activate a valid key with correct payment", async () => {
