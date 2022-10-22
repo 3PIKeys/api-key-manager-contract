@@ -15,7 +15,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   struct KeyDef {
     uint256 startTime;  // seconds
     uint256 expiryTime; // seconds
-    uint256 lastWithdrawal; // seconds
+    uint256 realizationTime; // seconds
     address owner;
     uint64 tierId;
   }
@@ -28,9 +28,13 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   /****************************************
    * Events
    ****************************************/
-  event ActivateKey(bytes32 indexed keyHash, address indexed owner);
+  event ActivateKey(bytes32 indexed keyHash, address indexed owner, uint256 duration);
+  event ExtendKey(bytes32 indexed keyHash, uint256 duration);
+  event ReactivateKey(bytes32 indexed keyHash, uint256 duration);
+  event DeactivateKey(bytes32 indexed keyHash);
   event AddTier(uint256 indexed tierId, uint256 price);
   event ArchiveTier(uint256 indexed tierId);
+  event Withdraw(address indexed owner, uint256 balance);
   
   /****************************************
    * ERC20 Token
@@ -85,6 +89,15 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   uint256 private _currentKeyId = 0;
 
   /****************************************
+   * Realized Profit
+   ****************************************
+   * @dev
+   * Profit that has been realized, but not
+   * yet withdrawn.
+   ****************************************/
+  uint256 private _realizedProfit = 0;
+
+  /****************************************
    * Constructor
    ****************************************/
   constructor(
@@ -109,30 +122,6 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   /****************************************
    * Internal Functions
    ****************************************/
-
-  /**
-    @dev Calculate the used balance available for withdrawal 
-    for a given key at a timestamp.
-  */
-  function usedBalance(bytes32 keyHash, uint256 timestamp) internal view _keyExists(keyHash) returns(uint256) {
-    uint256 lastWithdrawal = _keyDef[keyHash].lastWithdrawal;
-    uint256 expiryTime = _keyDef[keyHash].expiryTime;
-
-    // Only consider up to the expiry time of the key:
-    if(expiryTime < timestamp) {
-      timestamp = expiryTime;
-    }
-
-    // Return zero if key end time is less or equal to start time:
-    if(timestamp <= lastWithdrawal) {
-      return 0;
-    }
-
-    // Calculate used balance:
-    uint256 usedTime = timestamp - lastWithdrawal;
-    uint256 _usedBalance = usedTime * tierPrice(_keyDef[keyHash].tierId);
-    return _usedBalance;
-  }
 
   /**
     @dev Accepts an ERC20 payment for the given amount from
@@ -179,6 +168,14 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
+    @dev Returns the realized profit that is
+    waiting for withdrawal.
+  */
+  function realizedProfit() public view returns(uint256) {
+    return _realizedProfit;
+  }
+
+  /**
     @dev Checks if the key with the given hash has been activated
     at any point.
   */
@@ -194,6 +191,31 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
+    @dev Calculate the used balance available for withdrawal 
+    for a given key.
+  */
+  function usedBalance(bytes32 keyHash) public view _keyExists(keyHash) returns(uint256) {
+    uint256 realizationTime = _keyDef[keyHash].realizationTime;
+    uint256 expiryTime = _keyDef[keyHash].expiryTime;
+    uint256 timestamp = block.timestamp;
+
+    // Only consider up to the expiry time of the key:
+    if(expiryTime < timestamp) {
+      timestamp = expiryTime;
+    }
+
+    // Return zero if timestamp is less or equal to last realization:
+    if(timestamp <= realizationTime) {
+      return 0;
+    }
+
+    // Calculate used balance:
+    uint256 usedTime = timestamp - realizationTime;
+    uint256 _usedBalance = usedTime * tierPrice(_keyDef[keyHash].tierId);
+    return _usedBalance;
+  }
+
+  /**
     @dev Calculates the remaining balance for the key with the
     given hash.
   */
@@ -204,6 +226,15 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
       uint256 _remainingTime = _keyDef[keyHash].expiryTime - block.timestamp;
       return _remainingTime * tierPrice(_keyDef[keyHash].tierId);
     }
+  }
+
+  /**
+    @dev Realizes the used balance of the key as profit.
+  */
+  function realizeProfit(bytes32 keyHash) public _keyExists(keyHash) {
+    uint256 realizedBalance = usedBalance(keyHash);
+    _keyDef[keyHash].realizationTime = block.timestamp;
+    _realizedProfit += realizedBalance;
   }
 
   /**
@@ -253,20 +284,20 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     _keyHash[_currentKeyId++] = keyHash;
     _keyDef[keyHash].expiryTime = block.timestamp + secDuration;
     _keyDef[keyHash].startTime = block.timestamp;
-    _keyDef[keyHash].lastWithdrawal = block.timestamp;
+    _keyDef[keyHash].realizationTime = block.timestamp;
     _keyDef[keyHash].tierId = tierId;
     _keyDef[keyHash].owner = _msgSender();
 
     // Append key hash to address control list:
     _addressKeyHashes[_msgSender()].push(keyHash);
 
-    // Emit Transfer event:
-    emit ActivateKey(keyHash, _msgSender());
+    // Emit activation event:
+    emit ActivateKey(keyHash, _msgSender(), secDuration);
   }
 
   /**
-    @dev Extends the lifetime of a key by accepting a new
-    deposit to the key balance.
+    @dev Extends the lifetime of (or reactivates if expired) a key by
+    accepting a new deposit to the key balance.
   */
   function extendKey(bytes32 keyHash, uint256 secDuration) external _keyExists(keyHash) nonReentrant() {
     require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
@@ -282,12 +313,26 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
       acceptPayment(_amount);
     }
 
-    // Extend the expiry time:
+    // Realized the used balance of the key as profit:
+    realizeProfit(keyHash);
+
+    // Check the key's state:
     if(isKeyActive(keyHash)) {
+
+      // Extend the key:
       _keyDef[keyHash].expiryTime += secDuration;
+
+      // Emit extension event:
+      emit ExtendKey(keyHash, secDuration);
     } else {
+
+      // Reactivate the key:
+      _keyDef[keyHash].startTime = block.timestamp;
       _keyDef[keyHash].expiryTime = block.timestamp + secDuration;
-    }
+
+      // Emit reactivation event:
+      emit ReactivateKey(keyHash, secDuration);
+    }    
   }
 
   /**
@@ -296,14 +341,24 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   */
   function deactivateKey(bytes32 keyHash) external _keyExists(keyHash) nonReentrant() {
     require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
+    require(isKeyActive(keyHash), "APIKM: key not active");
+
+    // Calculate remaining balance:
     uint256 _remainingBalance = remainingBalance(keyHash);
-    require(_remainingBalance > 0, "APIKM: no balance");
+
+    // Realized the used balance of the key as profit:
+    realizeProfit(keyHash);
 
     // Expire key:
     _keyDef[keyHash].expiryTime = block.timestamp;
 
     // Send erc20 payment to owner:
-    IERC20(erc20).transfer(_msgSender(), _remainingBalance);
+    if(_remainingBalance > 0) {
+      IERC20(erc20).transfer(_msgSender(), _remainingBalance);
+    }
+
+    // Emit extension event:
+    emit DeactivateKey(keyHash);
   }
 
   /**
@@ -326,50 +381,55 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
-    @dev Returns the used balances available for withdrawal for
-    the keys with the given hashes at the given timestamp.
-    (does not check for duplicate keys)
+    @dev Calculates the total unrealized profit.
   */
-  function usedBalances(bytes32[] calldata keyHashes, uint256 timestamp) external view returns(uint256) {
-    uint256 balance = 0;
-    for(uint8 i = 0; i < uint8(keyHashes.length); i++) {
-      balance += usedBalance(keyHashes[i], timestamp);
-    }
-    return balance;
-  }
-
-  /**
-    @dev Returns the total used balances available for withdrawal
-    at the given timestamp.
-  */
-  function allUsedBalances(uint256 timestamp) external view returns(uint256) {
+  function unrealizedProfit() external view returns(uint256) {
     uint256 _numKeys = numKeys();
     uint256 balance = 0;
     for(uint256 id = 0; id < _numKeys; id++) {
-      balance += usedBalance(_keyHash[id], timestamp);
+      balance += usedBalance(_keyHash[id]);
     }
     return balance;
   }
 
   /**
-    @dev Withdraws the used balances of the given keyHashes.
-    Limitations are in place to prevent too many withdrawals
-    at once since the usedBalances(...) function is gas-heavy.
+    @dev Finds an array of keyHashes and corresponding unrealized amounts
+    that fit the given criteria.
+
+    NOTE: If less hashes than `count` are found, then the remainder of
+    the arrays will be filled with zero values.
   */
-  function withdrawUsedBalances(bytes32[] calldata keyHashes) external nonReentrant() onlyOwner {
-    require(keyHashes.length > 0, "APIKM: zero hashes");
-    require(keyHashes.length <= MAX_UINT8, "APIKM: too many hashes");
-    uint256 balance = 0;
-    for(uint256 i = 0; i < keyHashes.length; i++) {
-
-      // Add used balance of account:
-      balance += usedBalance(keyHashes[i], block.timestamp);
-
-      // Set last withdrawal for account (prevents duplicate withdrawals):
-      _keyDef[keyHashes[i]].lastWithdrawal = block.timestamp;
+  function findUnrealizedAccounts(uint256 count, uint256 minAmount, bool expiredOnly) external view returns(bytes32[] memory, uint256[] memory) {
+    bytes32[] memory keyHashes = new bytes32[](count);
+    uint256[] memory amounts = new uint256[](count);
+    uint256 found = 0;
+    uint256 _numKeys = numKeys();
+    for(uint256 id = 0; id < _numKeys && found < count; id++) {
+      if(!(expiredOnly && _keyDef[_keyHash[id]].expiryTime > block.timestamp) && _keyDef[_keyHash[id]].realizationTime < _keyDef[_keyHash[id]].expiryTime) {
+        uint256 unrealizedAmount = usedBalance(_keyHash[id]);
+        if(unrealizedAmount > minAmount) {
+          uint256 index = found++;
+          keyHashes[index] = _keyHash[id];
+          amounts[index] = unrealizedAmount;
+        }
+      }
     }
-    require(balance > 0, "APIKM: no balance");
-    IERC20(erc20).transfer(owner(), balance);
+    return (keyHashes, amounts);
+  }
+
+  /**
+    @dev Withdraws the realized profit.
+  */
+  function withdraw() external nonReentrant() onlyOwner {
+
+    // Transfer realized profit:
+    uint256 profit = _realizedProfit;
+    require(profit > 0, "APIKM: no profit");
+    _realizedProfit = 0;
+    IERC20(erc20).transfer(owner(), profit);
+
+    // Emit withdraw event:
+    emit Withdraw(owner(), profit);
   }
 
 }
