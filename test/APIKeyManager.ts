@@ -1,5 +1,4 @@
-import { time, loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
 import { ethers } from "hardhat";
 
@@ -49,6 +48,24 @@ describe("APIKeyManager", () => {
       expect(await keyManager.erc20()).to.equal(erc20.address);
     });
   });
+
+  describe("isTierActive(...)", function() {});
+
+  describe("tierPrice(...)", function() {});
+
+  describe("numTiers(...)", function() {});
+
+  describe("numKeys(...)", function() {});
+
+  describe("keyExists(...)", function() {});
+
+  describe("isKeyActive(...)", function() {});
+
+  describe("remainingBalance(...)", function() {});
+
+  describe("keyInfo(...)", function() {});
+
+  describe("keyHashOf(...)", function() {});
 
   describe("keyHashesOf(...)", function() {
     this.timeout(1000 * 1000);
@@ -122,7 +139,7 @@ describe("APIKeyManager", () => {
 
   });
 
-  describe("activateKey(...)", () => {
+  describe("activateKey(...)", function() {
 
     it("Should activate a valid key with correct payment", async () => {
       const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
@@ -162,9 +179,104 @@ describe("APIKeyManager", () => {
       await expect(keyManager.connect(otherAccounts[0]).activateKey(keyHash, keyDuration, tierId)).to.be.revertedWith("APIKM: low token allowance");
     });
 
+    it("Should revert if tierPrice * duration has an overflow error.", async () => {
+      const { keyManager, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Try to pass a tierPrice and duration that would result in an unsigned 256 bit overflow error:
+      const tierId = 3;
+      const tierPrice = tierPrices[tierId];
+      expect(tierPrice).to.be.greaterThan(2); // ensure the multiplication will overflow
+      const duration = ethers.BigNumber.from("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // max 256 bit value
+      try {
+        await keyManager.activateKey(getRandomKeySet().keyHash, duration, tierId);
+      } catch(err) {
+        expect(err instanceof Error).to.be.true;
+        if(err instanceof Error) {
+          expect(err.message.match(/panic code 0x11 (.+) overflow/)).to.not.be.null;
+        }
+      }
+    });
+
+    it("Should take control of the full deposit balance from the controller.", async () => {
+      const { keyManager, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Get starting balance of contract:
+      const startingBalance = await erc20.balanceOf(keyManager.address);
+
+      // Activate key with predetermined value:
+      const tierId = 1;
+      const tierPrice = tierPrices[tierId];
+      const duration = 100;
+      const payable = duration * tierPrice;
+      expect(payable).to.be.greaterThan(0);
+      await erc20.approve(keyManager.address, payable);
+      await keyManager.activateKey(getRandomKeySet().keyHash, duration, tierId);
+
+      // Get balance after deposit:
+      const balanceAfter = await erc20.balanceOf(keyManager.address);
+      expect(startingBalance.add(payable)).to.equal(balanceAfter);
+    });
+
+    it("Should NOT allow the activation of a key that already exists.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyHash } = getRandomKeySet();
+      await keyManager.activateKey(keyHash, 0, 0);
+      await expect(keyManager.activateKey(keyHash, 0, 0)).to.be.rejectedWith("APIKM: key exists");
+    });
+
+    it("Should NOT allow the activation of a key with an archived tier.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Archive a tier:
+      const tierId = 0;
+      await keyManager.archiveTier(tierId);
+
+      // Try to activate a key with that tier:
+      await expect(keyManager.activateKey(getRandomKeySet().keyHash, 0, tierId)).to.be.rejectedWith("APIKM: inactive tier");
+    });
+
+    it("Should allow the activation of a key on a free tier without payment.", async () => {
+      const { keyManager, erc20, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+
+      // Get starting balance:
+      const startingBalance = await erc20.balanceOf(keyManager.address);
+
+      // Activate free-tier key:
+      const { keyHash } = getRandomKeySet();
+      const tierId = 0;
+      expect(tierPrices[tierId]).to.equal(0);
+      await expect(keyManager.activateKey(keyHash, 0, tierId)).to.not.be.rejected;
+
+      // Check if balance is the same:
+      expect(await erc20.balanceOf(keyManager.address)).to.equal(startingBalance);
+    });
+
+    it("Should set the proper key information on activation.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const tierId = 0;
+      const duration = 100;
+      const { keyHash } = getRandomKeySet();
+      const res = await (await keyManager.activateKey(keyHash, duration, tierId)).wait();
+      const blockTimestamp = (await keyManager.provider.getBlock(res.blockNumber)).timestamp;
+      const keyInfo = await keyManager.keyInfo(keyHash);
+      expect(keyInfo.startTime).to.equal(blockTimestamp);
+      expect(keyInfo.lastWithdrawal).to.equal(blockTimestamp);
+      expect(keyInfo.expiryTime).to.equal(blockTimestamp + duration);
+      expect(keyInfo.tierId).to.equal(tierId);
+      expect(keyInfo.owner).to.equal(owner.address);
+    });
+
+    it("Should emit an accurate ActivateKey event.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const tierId = 0;
+      const duration = 100;
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.connect(owner).activateKey(keyHash, duration, tierId)).to.emit(keyManager, "ActivateKey").withArgs(keyHash, owner.address);
+    });
+
   });
 
-  describe("extendKey(...)", async () => {
+  describe("extendKey(...)", async function() {
     it("Should allow the owner of a key to extend its duration", async () => {
       const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
       
@@ -198,6 +310,16 @@ describe("APIKeyManager", () => {
     });
   });
 
+  describe("deactivateKey(...)", function() {});
+
+  describe("addTier(...)", function() {});
+
+  describe("archiveTier(...)", function() {});
+
+  describe("usedBalances(...)", function() {});
+  
+  describe("allUsedBalances(...)", function() {});
+
   describe("withdrawUsedBalances(...)", function() {
     this.timeout(1000 * 1000);
 
@@ -222,6 +344,8 @@ describe("APIKeyManager", () => {
       const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
       await expect(keyManager.connect(otherAccounts[0]).withdrawUsedBalances([])).to.be.rejectedWith("Ownable: caller is not the owner");
     });
+
+    it("Should set the lastWithdraw timestamp of withdrawn keys to the block's timestamp."); // TODO
 
     it("Should withdraw an amount equal to the amount of seconds passed since the last withdrawal per key multiplied by the tier price.", async () => {
       const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
