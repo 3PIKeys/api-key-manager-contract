@@ -28,7 +28,7 @@ describe("APIKeyManager", () => {
     return { keyManager, owner, otherAccounts, erc20 };
   };
   const deployAPIKeyManagerWithTiers = async () => {
-    const res = await deployAPIKeyManager();
+    const res = await loadFixture(deployAPIKeyManager);
     const tierPrices = [0, 1, 5, 10, 100];
     for(const price of tierPrices) {
       await (await res.keyManager.addTier(ethers.BigNumber.from(price))).wait();
@@ -100,7 +100,57 @@ describe("APIKeyManager", () => {
 
   describe("remainingBalance(...)", function() {});
 
-  describe("realizeProfit(...)", function() {});
+  describe("realizeProfit(...)", function() {
+
+    it("Should reject if key does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.realizeProfit(keyHash)).to.be.rejectedWith("APIKM: key does not exist");
+    });
+
+    it("Should add the realized profit to the current balance.", async () => {
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
+      const controller = otherAccounts[0];
+      
+      // Activate key:
+      let tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const { keyHash, tx } = await activateRandomKey(keyManager, controller, 100, tierId);
+      let lastRealization = await txTimestamp(tx, keyManager.provider);
+
+      // Realize multiple times and ensure that the balance is added each time:
+      let lastBalance = await keyManager.realizedProfit();
+      for(let i = 0; i < 5; i++) {
+        await waitSec(1);
+        const rTX = await keyManager.connect(controller).realizeProfit(keyHash);
+        const timestamp = await txTimestamp(rTX, keyManager.provider);
+        const duration = timestamp - lastRealization;
+        const expectedIncrease = ethers.BigNumber.from(tierPrices[tierId]).mul(duration);
+        const newBalance = await keyManager.realizedProfit();
+        expect(newBalance).to.equal(lastBalance.add(expectedIncrease));
+        lastBalance = newBalance;
+        lastRealization = timestamp;
+      }
+    });
+
+    it("Should allow a signer that is not owner of the key or contract to realize profit.", async () => {
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
+      const controller = otherAccounts[0];
+      const notController = otherAccounts[1];
+
+      // Activate key:
+      let tierId = 2;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+      // Wait 2 sec:
+      await waitSec(2);
+      
+      // Realize profit from signer that is not controller:
+      await expect(keyManager.connect(notController).realizeProfit(keyHash)).to.not.be.rejected;
+    });
+
+  });
 
   describe("keyInfo(...)", function() {});
 
@@ -115,7 +165,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should return an array containing only the keys for one controller.", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       
       // Init 3 random keys for all other accounts:
       const controllerMap = new Map<string, string[]>();
@@ -150,7 +200,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should include both active and not active keyHashes.", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
 
       // Deploy two keys:
       const keyHashes = [getRandomKeySet().keyHash, getRandomKeySet().keyHash];
@@ -181,7 +231,7 @@ describe("APIKeyManager", () => {
   describe("activateKey(...)", function() {
 
     it("Should activate a valid key with correct payment", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       
       // Get payable amount:
       const keyDuration = 1000 * 60 * 60; // 1 hour
@@ -200,7 +250,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should revert if allowance is too low", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
 
       // Get payable amount:
       const keyDuration = 1000 * 60 * 60; // 1 hour
@@ -219,7 +269,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should revert if tierPrice * duration has an overflow error.", async () => {
-      const { keyManager, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, tierPrices } = await deployAPIKeyManagerWithTiers();
 
       // Try to pass a tierPrice and duration that would result in an unsigned 256 bit overflow error:
       const tierId = 3;
@@ -237,7 +287,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should take control of the full deposit balance from the controller.", async () => {
-      const { keyManager, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
 
       // Get starting balance of contract:
       const startingBalance = await erc20.balanceOf(keyManager.address);
@@ -257,14 +307,14 @@ describe("APIKeyManager", () => {
     });
 
     it("Should NOT allow the activation of a key that already exists.", async () => {
-      const { keyManager } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager } = await deployAPIKeyManagerWithTiers();
       const { keyHash } = getRandomKeySet();
       await keyManager.activateKey(keyHash, 0, 0);
       await expect(keyManager.activateKey(keyHash, 0, 0)).to.be.rejectedWith("APIKM: key exists");
     });
 
     it("Should NOT allow the activation of a key with an archived tier.", async () => {
-      const { keyManager } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager } = await deployAPIKeyManagerWithTiers();
 
       // Archive a tier:
       const tierId = 0;
@@ -275,7 +325,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should allow the activation of a key on a free tier without payment.", async () => {
-      const { keyManager, erc20, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, erc20, tierPrices } = await deployAPIKeyManagerWithTiers();
 
       // Get starting balance:
       const startingBalance = await erc20.balanceOf(keyManager.address);
@@ -291,7 +341,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should set the proper key information on activation.", async () => {
-      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
       const tierId = 0;
       const duration = 100;
       const { keyHash } = getRandomKeySet();
@@ -306,7 +356,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should emit an accurate ActivateKey event.", async () => {
-      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
       const tierId = 0;
       const duration = 100;
       const { keyHash } = getRandomKeySet();
@@ -318,7 +368,7 @@ describe("APIKeyManager", () => {
   describe("extendKey(...)", async function() {
 
     it("Should allow the owner of a key to extend its duration", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       
       // Deploy Key:
       const keyDuration = 1000 * 60 * 60; // 1 hour
@@ -337,7 +387,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should NOT allow an extension to a key that does not exist", async () => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
 
       // Try to extend duration:
       const { keyHash } = getRandomKeySet();
@@ -348,7 +398,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should NOT allow an extension from a signer that is not owner.", async () => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
 
       // Activate new key:
       const activationSigner = otherAccounts[0];
@@ -361,7 +411,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should NOT allow an extension to a key that is in an archived tier.", async () => {
-      const { keyManager, owner, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner, otherAccounts } = await deployAPIKeyManagerWithTiers();
 
       // Activate new key:
       const tierId = 0;
@@ -376,7 +426,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should allow the extension of a free-tier key.", async () => {
-      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
 
       // Activate new free-tier key:
       const tierId = 0;
@@ -389,7 +439,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should realize any used balance when reactivating an expired key or extending an active key.", async () => {
-      const { keyManager, owner, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       for(let tierId = 0; tierId < tierPrices.length; tierId++) {
         // Activate a new key:
@@ -417,7 +467,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should allow the extension of a deactivated key.", async () => {
-      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       for(let tierId = 0; tierId < tierPrices.length; tierId++) {
         // Activate a new key:
@@ -436,7 +486,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should emit an ExtendKey event when extending while the key is still active.", async () => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
 
       // Activate new key:
       const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
@@ -448,7 +498,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should emit a ReactivateKey event when extending after the key has expired.", async () => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
 
       // Activate new key:
       const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 1, 0);
@@ -468,7 +518,7 @@ describe("APIKeyManager", () => {
   describe("deactivateKey(...)", function() {
 
     it("Should deactivate an active key.", async() => {
-      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       for(let tierId = 0; tierId < tierPrices.length; tierId++) {
         // Activate a new key:
@@ -486,7 +536,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should reject when deactivating a non-existent key.", async() => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       const { keyHash } = getRandomKeySet();
 
@@ -498,7 +548,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should reject when deactivating an expired key.", async() => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
 
       // Activate and deactivate a new key:
@@ -513,7 +563,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should reject when deactivating a key that is not owned.", async() => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       const notController = otherAccounts[1];
 
@@ -525,7 +575,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should emit a transfer event if funds are transferred.", async() => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
 
       // Activate a new key:
@@ -538,7 +588,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should NOT emit a transfer event if there are no funds to transfer.", async() => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
 
       // Activate a new key:
@@ -551,7 +601,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should emit a deactivation event if successful.", async() => {
-      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
       for(let tierId = 0; tierId < tierPrices.length; tierId++) {
         // Activate a new key:
@@ -563,7 +613,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should transfer unused funds back to the owner and realize the rest as profit.", async() => {
-      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
       const controller = otherAccounts[0];
 
       // Activate a new key:
@@ -604,7 +654,7 @@ describe("APIKeyManager", () => {
   describe("withdraw()", function() {
 
     it("Should reject if there is nothing to withdraw.", async () => {
-      const { keyManager, owner } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
 
       // Try to withdraw zero balance:
       expect(await keyManager.realizedProfit()).to.equal(0);
@@ -612,12 +662,12 @@ describe("APIKeyManager", () => {
     });
 
     it("Should not allow a withdrawal from an address that is not owner", async () => {
-      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
       await expect(keyManager.connect(otherAccounts[0]).withdraw()).to.be.rejectedWith("Ownable: caller is not the owner");
     });
 
     it("Should reset the realized profit value on the contract.", async () => {
-      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
 
       // Ensure that current realized profit is zero:
       expect(await keyManager.realizedProfit()).to.equal(0);
@@ -641,7 +691,7 @@ describe("APIKeyManager", () => {
     });
 
     it("Should withdraw the full realized profit amount.", async () => {
-      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
 
       // Activate key:
       const tierId = 3;
