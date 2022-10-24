@@ -2,7 +2,8 @@ import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { APIKeyManager, TestERC20 } from "../typechain-types";
-import type { Signer } from "ethers";
+import type { Signer, ContractTransaction } from "ethers";
+import type { Provider } from "@ethersproject/abstract-provider";
 
 describe("APIKeyManager", () => {
 
@@ -42,6 +43,14 @@ describe("APIKeyManager", () => {
     
     // Return keys:
     return { privateKey, keyHash };
+  };
+  const txTimestamp = async (tx: ContractTransaction, provider: Provider) => {
+    return (await provider.getBlock((await tx.wait()).blockNumber)).timestamp;
+  };
+  const waitSec = (sec: number) => {
+    return new Promise<void>((resolve) => {
+      setTimeout(resolve, sec * 1000);
+    });
   };
   const activateRandomKey = async (keyManager: APIKeyManager, signer: Signer, duration: number, tierId: number) => {
     const { keyHash } = getRandomKeySet();
@@ -380,7 +389,50 @@ describe("APIKeyManager", () => {
     });
 
     it("Should realize any used balance when reactivating an expired key or extending an active key.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      for(let tierId = 0; tierId < tierPrices.length; tierId++) {
+        // Activate a new key:
+        const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
 
+        // Wait 1 sec:
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 1000);
+        });
+
+        // Expect realized profit to be zero:
+        expect(await keyManager.realizedProfit()).to.equal(0);
+
+        // Extend Key and check realized profit:
+        await extendKey(keyManager, controller, keyHash, 100);
+        if(tierPrices[tierId] > 0) {
+          expect(await keyManager.realizedProfit()).to.be.greaterThan(0);
+
+          // Withdraw to reset realized profit:
+          await keyManager.connect(owner).withdraw();
+        } else {
+          expect(await keyManager.realizedProfit()).to.equal(0);
+        }
+      }
+    });
+
+    it("Should allow the extension of a deactivated key.", async () => {
+      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      for(let tierId = 0; tierId < tierPrices.length; tierId++) {
+        // Activate a new key:
+        const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+        // Deactivate key:
+        await keyManager.connect(controller).deactivateKey(keyHash);
+
+        // Check if it was deactivated:
+        expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+
+        // Extend Key:
+        await extendKey(keyManager, controller, keyHash, 100);
+        expect(await keyManager.isKeyActive(keyHash)).to.be.true;
+      }
     });
 
     it("Should emit an ExtendKey event when extending while the key is still active.", async () => {
@@ -413,7 +465,133 @@ describe("APIKeyManager", () => {
     });
   });
 
-  describe("deactivateKey(...)", function() {});
+  describe("deactivateKey(...)", function() {
+
+    it("Should deactivate an active key.", async() => {
+      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      for(let tierId = 0; tierId < tierPrices.length; tierId++) {
+        // Activate a new key:
+        const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+        // Ensure key is active:
+        expect(await keyManager.isKeyActive(keyHash)).to.be.true;
+
+        // Deactivate key:
+        await keyManager.connect(controller).deactivateKey(keyHash);
+
+        // Check if it was deactivated:
+        expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+      }
+    });
+
+    it("Should reject when deactivating a non-existent key.", async() => {
+      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      const { keyHash } = getRandomKeySet();
+
+      // Ensure key does not exist:
+      expect(await keyManager.keyExists(keyHash)).to.be.false;
+
+      // Try to deactivate key:
+      await expect(keyManager.connect(controller).deactivateKey(keyHash)).to.be.rejectedWith("APIKM: key does not exist");
+    });
+
+    it("Should reject when deactivating an expired key.", async() => {
+      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+
+      // Activate and deactivate a new key:
+      const { keyHash } = await activateRandomKey(keyManager, controller, 100, 0);
+      await keyManager.connect(controller).deactivateKey(keyHash);
+
+      // Ensure key is not active:
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+
+      // Try to deactivate key again:
+      await expect(keyManager.connect(controller).deactivateKey(keyHash)).to.be.rejectedWith("APIKM: key not active");
+    });
+
+    it("Should reject when deactivating a key that is not owned.", async() => {
+      const { keyManager, otherAccounts } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      const notController = otherAccounts[1];
+
+      // Activate a new key:
+      const { keyHash } = await activateRandomKey(keyManager, controller, 100, 0);
+
+      // Try to deactivate key from another signer:
+      await expect(keyManager.connect(notController).deactivateKey(keyHash)).to.be.rejectedWith("APIKM: not owner");
+    });
+
+    it("Should emit a transfer event if funds are transferred.", async() => {
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+
+      // Activate a new key:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+      // Deactivate key:
+      expect(keyManager.connect(controller).deactivateKey(keyHash)).to.emit(erc20.address, "Transfer");
+    });
+
+    it("Should NOT emit a transfer event if there are no funds to transfer.", async() => {
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+
+      // Activate a new key:
+      const tierId = 0;
+      expect(tierPrices[tierId]).to.equal(0);
+      const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+      // Deactivate key:
+      expect(keyManager.connect(controller).deactivateKey(keyHash)).to.not.emit(erc20.address, "Transfer");
+    });
+
+    it("Should emit a deactivation event if successful.", async() => {
+      const { keyManager, otherAccounts, tierPrices } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+      for(let tierId = 0; tierId < tierPrices.length; tierId++) {
+        // Activate a new key:
+        const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
+
+        // Deactivate key:
+        expect(keyManager.connect(controller).deactivateKey(keyHash)).to.emit(keyManager.address, "DeactivateKey").withArgs(keyHash);
+      }
+    });
+
+    it("Should transfer unused funds back to the owner and realize the rest as profit.", async() => {
+      const { keyManager, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
+      const controller = otherAccounts[0];
+
+      // Activate a new key:
+      const tierId = 1;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const duration = 100;
+      const { keyHash, tx } = await activateRandomKey(keyManager, controller, duration, tierId);
+      const activationTime = await txTimestamp(tx, keyManager.provider);
+
+      // Wait 2 sec:
+      const waitTime = 2;
+      await waitSec(waitTime);
+
+      // Deactivate key and find transferred amount:
+      expect(await keyManager.realizedProfit()).to.equal(0);
+      const balanceBefore = await erc20.balanceOf(controller.address);
+      const deactivateTX = await keyManager.connect(controller).deactivateKey(keyHash);
+      const deactivationTime = await txTimestamp(deactivateTX, keyManager.provider);
+      const timeActive = deactivationTime - activationTime;
+      const balanceAfter = await erc20.balanceOf(controller.address);
+      const expectedTransfer = ethers.BigNumber.from(duration - timeActive).mul(tierPrices[tierId]);
+      const expectedRealized = ethers.BigNumber.from(timeActive).mul(tierPrices[tierId]);
+      expect(expectedTransfer).to.be.greaterThan(0);
+      expect(expectedTransfer.add(balanceBefore)).to.equal(balanceAfter);
+      expect(await keyManager.realizedProfit()).to.equal(expectedRealized);
+    });
+
+  });
 
   describe("addTier(...)", function() {});
 
@@ -484,119 +662,6 @@ describe("APIKeyManager", () => {
       await keyManager.withdraw();
       expect(await erc20.balanceOf(owner.address)).to.equal(balanceBefore.add(realizedProfit));
     });
-
-    // it("Should withdraw an amount equal to the amount of seconds passed since the last withdrawal per key multiplied by the tier price.", async () => {
-    //   const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
-
-    //   // Calculate payable amount:
-    //   const tierId = 1;
-    //   expect(tierPrices[tierId]).to.be.greaterThan(0);
-    //   const keyDuration = 60; // 1 min
-    //   const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
-    //   expect(payable).to.be.greaterThan(0);
-
-    //   // Activate the key:
-    //   const controller = otherAccounts[0];
-    //   const { keyHash } = getRandomKeySet();
-    //   await erc20.connect(controller).approve(keyManager.address, payable);
-    //   const activateRes = await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
-    //   const activateTimestamp = (await keyManager.provider.getBlock((await activateRes.wait()).blockNumber)).timestamp;
-
-    //   // Wait for 2 seconds:
-    //   await new Promise((resolve) => {
-    //     setTimeout(resolve, 2000);
-    //   });
-
-    //   // Get owner balance before withdrawal:
-    //   const ownerBalanceBefore = await erc20.balanceOf(owner.address);
-
-    //   // Withdraw the used key balance:
-    //   const withdrawRes = await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
-    //   const withdrawTimestamp = (await keyManager.provider.getBlock((await withdrawRes.wait()).blockNumber)).timestamp;
-      
-    //   // Calculate the withdrawn amount:
-    //   const activeDuration = withdrawTimestamp - activateTimestamp;
-    //   const expectedWithdrawal = ethers.BigNumber.from(activeDuration).mul(tierPrices[tierId]);
-
-    //   // Check if it matches the actual amount withdrawn:
-    //   const ownerBalanceAfter = await erc20.balanceOf(owner.address);
-    //   expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(expectedWithdrawal);
-    // });
-
-    // it("Should withdraw the full amount originally deposited for a key when it is expired.", async () => {
-    //   const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
-
-    //   // Calculate payable amount:
-    //   const tierId = 1;
-    //   expect(tierPrices[tierId]).to.be.greaterThan(0);
-    //   const keyDuration = 2; // 2 seconds
-    //   const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
-    //   expect(payable).to.be.greaterThan(0);
-
-    //   // Activate the key:
-    //   const controller = otherAccounts[0];
-    //   const { keyHash } = getRandomKeySet();
-    //   await erc20.connect(controller).approve(keyManager.address, payable);
-    //   await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
-
-    //   // Wait for 1 second more than the key duration:
-    //   await new Promise((resolve) => {
-    //     setTimeout(resolve, 1000 * (keyDuration + 1));
-    //   });
-
-    //   // Get owner balance before withdrawal:
-    //   const ownerBalanceBefore = await erc20.balanceOf(owner.address);
-
-    //   // Withdraw the used key balance:
-    //   await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
-
-    //   // Check if payable amount matches the actual amount withdrawn:
-    //   const ownerBalanceAfter = await erc20.balanceOf(owner.address);
-    //   expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(payable);
-    // });
-
-    // it("Should withdraw the full amount originally deposited for a key when withdrawing multiple times over and beyond the key's lifetime.", async () => {
-    //   const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await loadFixture(deployAPIKeyManagerWithTiers);
-
-    //   // Calculate payable amount:
-    //   const tierId = 1;
-    //   expect(tierPrices[tierId]).to.be.greaterThan(0);
-    //   const keyDuration = 5; // 5 seconds
-    //   const payable = ethers.BigNumber.from(keyDuration).mul(tierPrices[tierId]);
-    //   expect(payable).to.be.greaterThan(0);
-
-    //   // Activate the key:
-    //   const controller = otherAccounts[0];
-    //   const { keyHash } = getRandomKeySet();
-    //   await erc20.connect(controller).approve(keyManager.address, payable);
-    //   await keyManager.connect(controller).activateKey(keyHash, keyDuration, tierId);
-    //   const localTxTime = Date.now();
-
-    //   // Get owner balance before withdrawal:
-    //   const ownerBalanceBefore = await erc20.balanceOf(owner.address);
-
-    //   // Withdraw repeatedly until key is expired:
-    //   const expiry = localTxTime + keyDuration * 1000;
-    //   let withdrawals = 0;
-    //   while(Date.now() < expiry) {
-    //     try {
-    //       await keyManager.connect(owner).withdrawUsedBalances([keyHash]);
-    //       withdrawals++;
-    //     } catch(err) {
-    //       if(err instanceof Error && err.message.match("APIKM: no balance")) {
-    //         break;
-    //       } else {
-    //         throw err;
-    //       }
-    //     }
-    //   }
-    //   expect(withdrawals).to.be.greaterThan(1);
-    //   expect(await keyManager.isKeyActive(keyHash)).to.be.false;
-
-    //   // Check if payable amount matches the total amount withdrawn:
-    //   const ownerBalanceAfter = await erc20.balanceOf(owner.address);
-    //   expect(ownerBalanceAfter.sub(ownerBalanceBefore)).to.equal(payable);
-    // });
 
   });
 
