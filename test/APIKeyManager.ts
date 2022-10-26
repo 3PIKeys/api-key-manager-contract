@@ -1,6 +1,6 @@
 import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
 import { APIKeyManager, TestERC20 } from "../typechain-types";
 import type { Signer, ContractTransaction } from "ethers";
 import type { Provider } from "@ethersproject/abstract-provider";
@@ -47,10 +47,9 @@ describe("APIKeyManager", () => {
   const txTimestamp = async (tx: ContractTransaction, provider: Provider) => {
     return (await provider.getBlock((await tx.wait()).blockNumber)).timestamp;
   };
-  const waitSec = (sec: number) => {
-    return new Promise<void>((resolve) => {
-      setTimeout(resolve, sec * 1000);
-    });
+  const waitSec = async (sec: number) => {
+    await network.provider.send("evm_increaseTime", [sec]);
+    await network.provider.send("evm_mine");
   };
   const activateRandomKey = async (keyManager: APIKeyManager, signer: Signer, duration: number, tierId: number) => {
     const { keyHash } = getRandomKeySet();
@@ -74,6 +73,18 @@ describe("APIKeyManager", () => {
     }
     return await keyManager.connect(signer).extendKey(keyHash, duration);
   };
+
+  describe("[helper] waitSec(...)", function() {
+    it("Should simulate waiting X seconds before the next block is mined.", async () => {
+      const { erc20, owner, otherAccounts } = await loadFixture(deployAPIKeyManager);
+      for(let duration = 1; duration < 20; duration ++) {
+        const tx1 = await txTimestamp(await erc20.connect(owner).transfer(otherAccounts[0].address, 1), erc20.provider);
+        await waitSec(duration);
+        const tx2 = await txTimestamp(await erc20.connect(owner).transfer(otherAccounts[0].address, 1), erc20.provider);
+        expect(tx2 - duration).to.be.gte(tx1);
+      }
+    });
+  });
 
   describe("Deployment", () => {
     it("Should set the right ERC20 token address", async () => {
@@ -152,9 +163,61 @@ describe("APIKeyManager", () => {
 
   });
 
-  describe("keyInfo(...)", function() {});
+  describe("keyInfo(...)", function() {
 
-  describe("keyHashOf(...)", function() {});
+    it("Should return the correct info for a key.", async () => {
+      const { keyManager, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
+      for(let i = 0; i < 20; i++) {
+        const tierId = Math.floor(Math.random() * tierPrices.length);
+        const duration = Math.floor(Math.random() * 100) + 1;
+        const controller = otherAccounts[Math.floor(Math.random() * otherAccounts.length)];
+        const { keyHash, tx } = await activateRandomKey(keyManager, controller, duration, tierId);
+        const txTime = await txTimestamp(tx, keyManager.provider);
+        const keyInfo = await keyManager.keyInfo(keyHash);
+        expect(keyInfo.startTime).to.equal(txTime);
+        expect(keyInfo.expiryTime).to.equal(txTime + duration);
+        expect(keyInfo.realizationTime).to.equal(txTime);
+        expect(keyInfo.owner).to.equal(controller.address);
+        expect(keyInfo.tierId).to.equal(tierId);
+      }
+    });
+
+    it("Should reject if the key does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.keyInfo(keyHash)).to.be.rejectedWith("APIKM: key does not exist");
+    });
+
+  });
+
+  describe("keyHashOf(...)", function() {
+
+    it("Should return the correct keyHash.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      let lastKeyHash = "";
+      for(let i = 0; i < 10; i++) {
+        const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
+        expect(await keyManager.keyHashOf(i)).to.equal(keyHash);
+        if(i > 0) {
+          expect(await keyManager.keyHashOf(i - 1)).to.equal(lastKeyHash);
+        }
+        lastKeyHash = keyHash;
+      }
+    });
+
+    it("Should reject if keyId does not exist.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      for(let i = 0; i < 10; i++) {
+        const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
+        expect(await keyManager.keyHashOf(i)).to.equal(keyHash);
+        expect(await keyManager.numKeys()).to.equal(i + 1);
+
+        // Try to fetch key hash from ID that has not been created yet:
+        await expect(keyManager.keyHashOf(i + 1)).to.be.rejectedWith("APIKM: nonexistent keyId");
+      }
+    });
+
+  });
 
   describe("keyHashesOf(...)", function() {
     this.timeout(1000 * 1000);
@@ -446,9 +509,7 @@ describe("APIKeyManager", () => {
         const { keyHash } = await activateRandomKey(keyManager, controller, 100, tierId);
 
         // Wait 1 sec:
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, 1000);
-        });
+        await waitSec(1);
 
         // Expect realized profit to be zero:
         expect(await keyManager.realizedProfit()).to.equal(0);
@@ -504,9 +565,7 @@ describe("APIKeyManager", () => {
       const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 1, 0);
 
       // Wait for key to expire:
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 1000);
-      });
+      await waitSec(1);
 
       // Extend key:
       const duration = 100;
@@ -643,11 +702,134 @@ describe("APIKeyManager", () => {
 
   });
 
-  describe("addTier(...)", function() {});
+  describe("addTier(...)", function() {
 
-  describe("archiveTier(...)", function() {});
+    it("Should allow the contract owner to add a new tier.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      for(let i = 0; i < 20; i++) {
+        const price = i * 2;
+        await expect(keyManager.connect(owner).addTier(price)).to.not.be.rejected;
+        expect(await keyManager.connect(owner).tierPrice(i)).to.equal(price);
+      }
+    });
 
-  describe("unrealizedProfit()", function() {});
+    it("Should NOT allow an address that is not contract owner to add a new tier.", async () => {
+      const { keyManager, owner, otherAccounts } = await loadFixture(deployAPIKeyManager);
+      for(let i = 0; i < otherAccounts.length; i++) {
+        const account = otherAccounts[i];
+        expect(account.address).to.not.equal(owner.address);
+        await expect(keyManager.connect(account).addTier(i)).to.be.rejectedWith("Ownable: caller is not the owner");
+      }
+    });
+
+    it("Should activate the next tierId.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      for(let i = 0; i < 10; i++) {
+        const price = 0;
+        await keyManager.connect(owner).addTier(price);
+        expect(await keyManager.isTierActive(i)).to.be.true;
+        await expect(keyManager.isTierActive(i + 1)).to.be.rejectedWith("APIKM: tier does not exist");
+      }
+    });
+
+    it("Should emit a tier addition event.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      for(let i = 0; i < 10; i++) {
+        const price = i + 1;
+        expect(keyManager.connect(owner).addTier(price)).to.emit(keyManager.address, "AddTier").withArgs(i, price);
+      }
+    });
+
+  });
+
+  describe("archiveTier(...)", function() {
+
+    it("Should allow the contract owner to archive a tier.", async () => {
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
+      const numTiers = (await keyManager.numTiers()).toNumber();
+      for(let i = 0; i < numTiers; i++) {
+        expect(await keyManager.isTierActive(i)).to.be.true;
+        await keyManager.connect(owner).archiveTier(i);
+        expect(await keyManager.isTierActive(i)).to.be.false;
+      }
+    });
+
+    it("Should NOT allow an address that is not contract owner to archive a tier.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices } = await deployAPIKeyManagerWithTiers();
+      for(let i = 0; i < otherAccounts.length; i++) {
+        const account = otherAccounts[i];
+        expect(account.address).to.not.equal(owner.address);
+        await expect(keyManager.connect(account).archiveTier(Math.floor(Math.random() * tierPrices.length))).to.be.rejectedWith("Ownable: caller is not the owner");
+      }
+    });
+
+    it("Should reject if tier does not exist.", async () => {
+      const { keyManager, owner, tierPrices } = await deployAPIKeyManagerWithTiers();
+      expect(tierPrices.length).to.equal(await keyManager.numTiers());
+      await expect(keyManager.connect(owner).archiveTier(tierPrices.length)).to.be.rejectedWith("APIKM: tier does not exist");
+    });
+
+    it("Should emit a tier archive event.", async () => {
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
+      const numTiers = await keyManager.numTiers();
+      for(let i = 0; numTiers.gt(i); i++) {
+        expect(keyManager.connect(owner).archiveTier(i)).to.emit(keyManager.address, "ArchiveTier").withArgs(i);
+      }
+    });
+
+  });
+
+  describe("unrealizedProfit()", function() {
+    this.timeout(10000);
+
+    it("Should be zero at contract initialization.", async () => {
+      const { keyManager } = await deployAPIKeyManagerWithTiers();
+      expect(await keyManager.unrealizedProfit()).to.equal(0);
+    });
+
+    it("Should return the unrealized profit locked in the contract.", async () => {
+      const { keyManager, otherAccounts, erc20, tierPrices } = await deployAPIKeyManagerWithTiers();
+
+      // Activate a bunch of keys with long durations:
+      let keyHashes: string[] = [];
+      let totalDeposited = 0;
+      const duration = 2;
+      const numKeys = 10;
+      const receipts: Promise<any>[] = [];
+      for(let i = 0; i < numKeys; i++) {
+        const tierId = Math.floor(Math.random() * (tierPrices.length - 1)) + 1;
+        expect(tierPrices[tierId]).to.be.greaterThan(0);
+        const { keyHash, tx } = await activateRandomKey(keyManager, otherAccounts[0], duration, tierId);
+        receipts.push(tx.wait());
+        totalDeposited += duration * tierPrices[tierId];
+        keyHashes.push(keyHash);
+      }
+      await Promise.all(receipts);
+      expect(keyHashes.length).to.equal(numKeys);
+      expect(await keyManager.numKeys()).to.equal(numKeys);
+
+      // Wait for keys to expire:
+      await waitSec(duration);
+
+      // Check that unrealized profit is the same as total contract balance;
+      const initialUnrealized = await keyManager.unrealizedProfit();
+      const balance = await erc20.balanceOf(keyManager.address);
+      expect(balance).to.equal(totalDeposited);
+      expect(initialUnrealized).to.equal(balance);
+
+      // Realize profit:
+      for(const keyHash of keyHashes) {
+        await keyManager.realizeProfit(keyHash);
+      }
+
+      // Check that unrealized profit has reduced as that contract balance is equal to realized + unrealized profit:
+      const remainingUnrealized = await keyManager.unrealizedProfit();
+      expect(remainingUnrealized).to.equal(0);
+      expect(remainingUnrealized.add(await keyManager.realizedProfit())).to.equal(await erc20.balanceOf(keyManager.address));
+    });
+
+  });
   
   describe("findUnrealizedAccounts(...)", function() {});
 
@@ -661,7 +843,7 @@ describe("APIKeyManager", () => {
       await expect(keyManager.connect(owner).withdraw()).to.be.rejectedWith("APIKM: no profit");
     });
 
-    it("Should not allow a withdrawal from an address that is not owner", async () => {
+    it("Should NOT allow a withdrawal from an address that is not owner", async () => {
       const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
       await expect(keyManager.connect(otherAccounts[0]).withdraw()).to.be.rejectedWith("Ownable: caller is not the owner");
     });
@@ -679,9 +861,7 @@ describe("APIKeyManager", () => {
       const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], duration, tierId);
 
       // Wait for key to expire, then realize key value:
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, duration * 1000);
-      });
+      await waitSec(duration);
       await keyManager.realizeProfit(keyHash);
       expect(await keyManager.realizedProfit()).to.be.greaterThan(0);
 
@@ -700,9 +880,7 @@ describe("APIKeyManager", () => {
       const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], duration, tierId);
 
       // Wait for key to expire, then realize key value:
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, duration * 1000);
-      });
+      await waitSec(duration);
       await keyManager.realizeProfit(keyHash);
       const realizedProfit = await keyManager.realizedProfit();
       expect(realizedProfit).to.be.greaterThan(0);
@@ -711,6 +889,25 @@ describe("APIKeyManager", () => {
       const balanceBefore = await erc20.balanceOf(owner.address);
       await keyManager.withdraw();
       expect(await erc20.balanceOf(owner.address)).to.equal(balanceBefore.add(realizedProfit));
+    });
+
+    it("Should emit a withdrawal event.", async () => {
+      const { keyManager, owner, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
+
+      // Activate key:
+      const tierId = 3;
+      const duration = 2;
+      expect(tierPrices[tierId]).to.be.greaterThan(0);
+      const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], duration, tierId);
+
+      // Wait for key to expire, then realize key value:
+      await waitSec(duration);
+      await keyManager.realizeProfit(keyHash);
+      const realizedProfit = await keyManager.realizedProfit();
+      expect(realizedProfit).to.be.greaterThan(0);
+
+      // Withdraw and check if the event was emitted:
+      expect(keyManager.withdraw()).to.emit(keyManager.address, "Withdraw").withArgs(owner.address, realizedProfit);
     });
 
   });
