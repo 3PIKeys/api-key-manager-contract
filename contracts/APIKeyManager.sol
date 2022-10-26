@@ -210,9 +210,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     }
 
     // Calculate used balance:
-    uint256 usedTime = timestamp - realizationTime;
-    uint256 _usedBalance = usedTime * tierPrice(_keyDef[keyHash].tierId);
-    return _usedBalance;
+    return ((timestamp - realizationTime) * tierPrice(_keyDef[keyHash].tierId));
   }
 
   /**
