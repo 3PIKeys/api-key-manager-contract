@@ -5,8 +5,6 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-uint256 constant MAX_UINT8 = 2**8-1;
-
 contract APIKeyManager is Ownable, ReentrancyGuard {
 
   /****************************************
