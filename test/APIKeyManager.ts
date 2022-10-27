@@ -7,6 +7,9 @@ import type { Provider } from "@ethersproject/abstract-provider";
 
 describe("APIKeyManager", () => {
 
+  const subUnit = (val: number, decimals = 18) => {
+    return ethers.BigNumber.from(Number(val).toFixed(decimals).replace(/\./g, ''));
+  }
   const deployTestERC20 = async () => {
     const TestERC20 = await ethers.getContractFactory("TestERC20");
     const erc20 = await TestERC20.deploy();
@@ -15,7 +18,7 @@ describe("APIKeyManager", () => {
     // Assign initial balances:
     const [owner, ...others] = await ethers.getSigners();
     for(const account of others) {
-      await (await erc20.connect(owner).transfer(account.address, ethers.BigNumber.from(1_000).mul(ethers.BigNumber.from(10).pow(18)))).wait();
+      await (await erc20.connect(owner).transfer(account.address, subUnit(1_000_000))).wait();
     }
 
     return erc20;
@@ -29,7 +32,7 @@ describe("APIKeyManager", () => {
   };
   const deployAPIKeyManagerWithTiers = async () => {
     const res = await loadFixture(deployAPIKeyManager);
-    const tierPrices = [0, 1, 5, 10, 100];
+    const tierPrices = [subUnit(0), subUnit(0.01), subUnit(0.05), subUnit(0.1), subUnit(1)];
     for(const price of tierPrices) {
       await (await res.keyManager.addTier(ethers.BigNumber.from(price))).wait();
     }
@@ -93,19 +96,204 @@ describe("APIKeyManager", () => {
     });
   });
 
-  describe("isTierActive(...)", function() {});
+  describe("isTierActive(...)", function() {
 
-  describe("tierPrice(...)", function() {});
+    it("Should reject if tier does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      await expect(keyManager.isTierActive(0)).to.be.rejectedWith("APIKM: tier does not exist");
+      await expect(keyManager.isTierActive(1)).to.be.rejectedWith("APIKM: tier does not exist");
+      await expect(keyManager.isTierActive(2)).to.be.rejectedWith("APIKM: tier does not exist");
+    });
 
-  describe("numTiers()", function() {});
+    it("Should return true if tier is active.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      await keyManager.connect(owner).addTier(1);
+      expect(await keyManager.isTierActive(0)).to.be.true;
+    });
 
-  describe("numKeys()", function() {});
+    it("Should return false if tier has been archived.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      await keyManager.connect(owner).addTier(1);
+      await keyManager.connect(owner).archiveTier(0);
+      expect(await keyManager.isTierActive(0)).to.be.false;
+    });
 
-  describe("realizedProfit()", function() {});
+  });
 
-  describe("keyExists(...)", function() {});
+  describe("tierPrice(...)", function() {
 
-  describe("isKeyActive(...)", function() {});
+    it("Should reject if tier does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      await expect(keyManager.tierPrice(0)).to.be.rejectedWith("APIKM: tier does not exist");
+      await expect(keyManager.tierPrice(1)).to.be.rejectedWith("APIKM: tier does not exist");
+      await expect(keyManager.tierPrice(2)).to.be.rejectedWith("APIKM: tier does not exist");
+    });
+
+    it("Should return the correct tier price for a given tier.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+
+      // Add tiers:
+      const numTiers = 10;
+      const multiplier = 2;
+      for(let i = 0; i < numTiers; i++) {
+        await keyManager.connect(owner).addTier(i * multiplier);
+      }
+
+      // Check prices:
+      for(let i = 0; i < numTiers; i++) {
+        expect(await keyManager.tierPrice(i)).to.equal(i * multiplier);
+      }
+    });
+
+    it("Should still return the price for an archived tier.", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      const price = Math.floor(Math.random() * 1_000_000) + 1;
+      await keyManager.connect(owner).addTier(price);
+      expect(await keyManager.tierPrice(0)).to.equal(price);
+      await keyManager.connect(owner).archiveTier(0);
+      expect(await keyManager.isTierActive(0)).to.be.false;
+      expect(await keyManager.tierPrice(0)).to.equal(price);
+    });
+
+  });
+
+  describe("numTiers()", function() {
+
+    it("Should return zero on contract initialization.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+    });
+
+    it("Should return the total number of tiers ever created (archived and active).", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numTiers()).to.equal(0);
+      for(let i = 0; i < 10; i++) {
+        await keyManager.connect(owner).addTier(i * 3); // derive price from tier index * 3
+        if(i % 2 == 0) {
+          await keyManager.connect(owner).archiveTier(i);
+        }
+        expect(await keyManager.numTiers()).to.equal(i + 1);
+      }
+    });
+
+  });
+
+  describe("numKeys()", function() {
+
+    it("Should return zero on contract initialization.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numKeys()).to.equal(0);
+    });
+
+    it("Should return the total number of keys ever created (active and not active).", async () => {
+      const { keyManager, owner } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.numKeys()).to.equal(0);
+      expect(await keyManager.numTiers()).to.equal(0);
+      await keyManager.connect(owner).addTier(subUnit(0.01)); // add tier with price of 0.01 tokens per sec
+      for(let i = 0; i < 10; i++) {
+        const { keyHash } = await activateRandomKey(keyManager, owner, 2 + i * 3, 0);
+        if(i % 2 == 0) {
+          await keyManager.connect(owner).deactivateKey(keyHash);
+        }
+        expect(await keyManager.numKeys()).to.equal(i + 1);
+      }
+    });
+
+  });
+
+  describe("realizedProfit()", function() {
+
+    it("Should return zero on contract initialization.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      expect(await keyManager.realizedProfit()).to.equal(0);
+    });
+
+    it("Should return the total amount of realized profit.", async () => {
+      const { keyManager, owner, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
+
+      // Ensure contract balance is zero:
+      expect(await erc20.balanceOf(keyManager.address)).to.equal(0);
+      
+      // Activate a bunch of keys:
+      const numKeys = 10;
+      const duration = 3;
+      const tierId = 1;
+      expect(tierPrices[tierId].gt(0)).to.be.true;
+      const keyHashes: string[] = [];
+      for(let i = 0; i < numKeys; i++) {
+        keyHashes.push((await activateRandomKey(keyManager, owner, duration, tierId)).keyHash);
+      }
+
+      // Wait for keys to expire:
+      await waitSec(duration);
+
+      // Get balance of contract:
+      const balance = await erc20.balanceOf(keyManager.address);
+
+      // Realize key profit:
+      for(const keyHash of keyHashes) {
+        await keyManager.connect(owner).realizeProfit(keyHash);
+      }
+
+      // Check if realized profit matches entire balance:
+      expect(await keyManager.realizedProfit()).to.equal(balance);
+    });
+
+  });
+
+  describe("keyExists(...)", function() {
+
+    it("Should return true for a key that is active.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
+      expect(await keyManager.keyExists(keyHash)).to.be.true;
+    });
+
+    it("Should return true for a key that is expired.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
+      await keyManager.connect(otherAccounts[0]).deactivateKey(keyHash);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+      expect(await keyManager.keyExists(keyHash)).to.be.true;
+    });
+
+    it("Should return false for a key that does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      expect(await keyManager.keyExists(keyHash)).to.be.false;
+    });
+
+  });
+
+  describe("isKeyActive(...)", function() {
+
+    it("Should return true for a key that is active.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], 100, 0);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.true;
+    });
+
+    it("Should return false for a key that has expired.", async () => {
+      const { keyManager, otherAccounts } = await deployAPIKeyManagerWithTiers();
+      const duration = 2;
+      const { keyHash } = await activateRandomKey(keyManager, otherAccounts[0], duration, 0);
+      await waitSec(duration);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+    });
+
+    it("Should reject if key does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.isKeyActive(keyHash)).to.be.rejectedWith("APIKM: key does not exist");
+    });
+
+  });
 
   describe("usedBalance(...)", function() {});
 
@@ -299,7 +487,7 @@ describe("APIKeyManager", () => {
       // Get payable amount:
       const keyDuration = 1000 * 60 * 60; // 1 hour
       const tierId = 0;
-      const payable = tierPrices[tierId] * keyDuration;
+      const payable = tierPrices[tierId].mul(keyDuration);
 
       // Authorize payable amount on erc20:
       await (await erc20.connect(otherAccounts[0]).approve(keyManager.address, payable)).wait();
@@ -318,7 +506,7 @@ describe("APIKeyManager", () => {
       // Get payable amount:
       const keyDuration = 1000 * 60 * 60; // 1 hour
       const tierId = 1;
-      const payable = tierPrices[tierId] * keyDuration;
+      const payable = tierPrices[tierId].mul(keyDuration);
       expect(payable).to.be.greaterThan(0);
 
       // Authorize payable amount **MINUS 1** on erc20:
@@ -359,7 +547,7 @@ describe("APIKeyManager", () => {
       const tierId = 1;
       const tierPrice = tierPrices[tierId];
       const duration = 100;
-      const payable = duration * tierPrice;
+      const payable = tierPrice.mul(duration);
       expect(payable).to.be.greaterThan(0);
       await erc20.approve(keyManager.address, payable);
       await keyManager.activateKey(getRandomKeySet().keyHash, duration, tierId);
@@ -428,7 +616,7 @@ describe("APIKeyManager", () => {
 
   });
 
-  describe("extendKey(...)", async function() {
+  describe("extendKey(...)", function() {
 
     it("Should allow the owner of a key to extend its duration", async () => {
       const { keyManager, otherAccounts, tierPrices, erc20 } = await deployAPIKeyManagerWithTiers();
@@ -516,7 +704,7 @@ describe("APIKeyManager", () => {
 
         // Extend Key and check realized profit:
         await extendKey(keyManager, controller, keyHash, 100);
-        if(tierPrices[tierId] > 0) {
+        if(tierPrices[tierId].gt(0)) {
           expect(await keyManager.realizedProfit()).to.be.greaterThan(0);
 
           // Withdraw to reset realized profit:
@@ -793,7 +981,7 @@ describe("APIKeyManager", () => {
 
       // Activate a bunch of keys with long durations:
       let keyHashes: string[] = [];
-      let totalDeposited = 0;
+      let totalDeposited = ethers.BigNumber.from(0);
       const duration = 2;
       const numKeys = 10;
       const receipts: Promise<any>[] = [];
@@ -802,7 +990,7 @@ describe("APIKeyManager", () => {
         expect(tierPrices[tierId]).to.be.greaterThan(0);
         const { keyHash, tx } = await activateRandomKey(keyManager, otherAccounts[0], duration, tierId);
         receipts.push(tx.wait());
-        totalDeposited += duration * tierPrices[tierId];
+        totalDeposited = totalDeposited.add(tierPrices[tierId].mul(duration));
         keyHashes.push(keyHash);
       }
       await Promise.all(receipts);
