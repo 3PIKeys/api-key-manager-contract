@@ -5,7 +5,7 @@ import "@nomicfoundation/hardhat-toolbox";
 // if(!deployKey) throw new Error("missing deploy key in environment vars");
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.9",
+  solidity: "0.8.17",
   // networks: {
   //   goerli: {
   //     url: "https://rpc.ankr.com/eth_goerli",
