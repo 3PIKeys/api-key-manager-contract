@@ -1,9 +1,6 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
 
-// const deployKey = process.env["DEPLOY_KEY"];
-// if(!deployKey) throw new Error("missing deploy key in environment vars");
-
 const config: HardhatUserConfig = {
   solidity: "0.8.17",
   // networks: {
@@ -12,6 +9,12 @@ const config: HardhatUserConfig = {
   //     accounts: [deployKey]
   //   }
   // }
+  networks: {
+    mumbai: {
+      url: "https://matic-mumbai.chainstacklabs.com",
+      accounts: process.env["DEPLOY_KEY"] ? [process.env["DEPLOY_KEY"]] : []
+    }
+  }
 };
 
 export default config;

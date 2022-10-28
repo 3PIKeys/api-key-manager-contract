@@ -1,14 +1,16 @@
 import { ethers } from "hardhat";
 
-const deployTestERC20 = async () => {
-  const TestERC20 = await ethers.getContractFactory("TestERC20");
-  const erc20 = await TestERC20.deploy();
-  await erc20.deployed();
-  return erc20.address;
-};
+if(!process.env["DEPLOY_KEY"]) {
+  throw new Error("Missing DEPLOY_KEY environment variable!");
+}
+
+const erc20Address = process.env["ERC20"];
+if(!erc20Address) {
+  throw new Error("Missing ERC20 environment variable!");
+}
 
 const deployAPIKeyManager = async () => {
-  const erc20Address = await deployTestERC20();
+  console.log("Deploying APIKeyManager contract...");
   const APIKeyManager = await ethers.getContractFactory("APIKeyManager");
   const keyManager = await APIKeyManager.deploy(erc20Address);
   await keyManager.deployed();
