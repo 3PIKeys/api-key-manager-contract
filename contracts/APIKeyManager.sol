@@ -30,8 +30,8 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   event ExtendKey(bytes32 indexed keyHash, uint256 duration);
   event ReactivateKey(bytes32 indexed keyHash, uint256 duration);
   event DeactivateKey(bytes32 indexed keyHash);
-  event AddTier(uint256 indexed tierId, uint256 price);
-  event ArchiveTier(uint256 indexed tierId);
+  event AddTier(uint64 indexed tierId, uint256 price);
+  event ArchiveTier(uint64 indexed tierId);
   event Withdraw(address indexed owner, uint256 balance);
   
   /****************************************
@@ -51,9 +51,9 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   mapping(uint64 => Tier) private _tier;
 
   /****************************************
-   * Tier index tracker
+   * Current number of tiers
    ****************************************/
-  uint64 private _currentTierId = 0;
+  uint64 private _numTiers = 0;
 
   /****************************************
    * Key Hash Map
@@ -82,9 +82,9 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   mapping(address => bytes32[]) private _addressKeyHashes;
 
   /****************************************
-   * Current Key Id
+   * Current number of keys
    ****************************************/
-  uint256 private _currentKeyId = 0;
+  uint256 private _numKeys = 0;
 
   /****************************************
    * Realized Profit
@@ -113,7 +113,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   modifier _tierExists(uint64 tierId) {
-    require(tierId < _currentTierId, "APIKM: tier does not exist");
+    require(tierId < _numTiers, "APIKM: tier does not exist");
     _;
   }
 
@@ -154,7 +154,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     (active and archived)
   */
   function numTiers() public view returns(uint64) {
-    return _currentTierId;
+    return _numTiers;
   }
 
   /**
@@ -162,7 +162,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     (active and not active)
   */
   function numKeys() public view returns(uint256) {
-    return _currentKeyId;
+    return _numKeys;
   }
 
   /**
@@ -243,7 +243,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     @dev Returns the key hash for the given key ID.
   */
   function keyHashOf(uint256 keyId) public view returns(bytes32) {
-    require(keyId < _currentKeyId, "APIKM: nonexistent keyId");
+    require(keyId < _numKeys, "APIKM: nonexistent keyId");
     return _keyHash[keyId];
   }
 
@@ -276,7 +276,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     }
 
     // Initialize Key:
-    _keyHash[_currentKeyId++] = keyHash;
+    _keyHash[_numKeys++] = keyHash;
     _keyDef[keyHash].expiryTime = block.timestamp + secDuration;
     _keyDef[keyHash].startTime = block.timestamp;
     _keyDef[keyHash].realizationTime = block.timestamp;
@@ -308,7 +308,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
       acceptPayment(_amount);
     }
 
-    // Realized the used balance of the key as profit:
+    // Realize the used balance of the key as profit:
     realizeProfit(keyHash);
 
     // Check the key's state:
@@ -332,7 +332,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
 
   /**
     @dev Deactivates a key and returns the unused balance to 
-    the key owner.
+    the key controller.
   */
   function deactivateKey(bytes32 keyHash) external _keyExists(keyHash) nonReentrant() {
     require(_keyDef[keyHash].owner == _msgSender(), "APIKM: not owner");
@@ -341,26 +341,26 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     // Calculate remaining balance:
     uint256 _remainingBalance = remainingBalance(keyHash);
 
-    // Realized the used balance of the key as profit:
+    // Realize the used balance of the key as profit:
     realizeProfit(keyHash);
 
     // Expire key:
     _keyDef[keyHash].expiryTime = block.timestamp;
 
-    // Send erc20 payment to owner:
+    // Send erc20 payment to controller:
     if(_remainingBalance > 0) {
       IERC20(erc20).transfer(_msgSender(), _remainingBalance);
     }
 
-    // Emit extension event:
+    // Emit deactivation event:
     emit DeactivateKey(keyHash);
   }
 
   /**
-    @dev Appends a new tier with the given price.
+    @dev Appends a new tier with the given price per second.
   */
   function addTier(uint256 price) external onlyOwner {
-    uint64 tierId = _currentTierId++;
+    uint64 tierId = _numTiers++;
     _tier[tierId].price = price;
     _tier[tierId].active = true;
     emit AddTier(tierId, price);
@@ -379,7 +379,6 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     @dev Calculates the total unrealized profit.
   */
   function unrealizedProfit() external view returns(uint256) {
-    uint256 _numKeys = numKeys();
     uint256 balance = 0;
     for(uint256 id = 0; id < _numKeys; id++) {
       balance += usedBalance(_keyHash[id]);
@@ -398,7 +397,6 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     bytes32[] memory keyHashes = new bytes32[](count);
     uint256[] memory amounts = new uint256[](count);
     uint256 found = 0;
-    uint256 _numKeys = numKeys();
     for(uint256 id = 0; id < _numKeys && found < count; id++) {
       if(!(expiredOnly && _keyDef[_keyHash[id]].expiryTime > block.timestamp) && _keyDef[_keyHash[id]].realizationTime < _keyDef[_keyHash[id]].expiryTime) {
         uint256 unrealizedAmount = usedBalance(_keyHash[id]);
