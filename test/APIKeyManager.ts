@@ -8,8 +8,22 @@ import type { Provider } from "@ethersproject/abstract-provider";
 describe("APIKeyManager", () => {
 
   const subUnit = (val: number, decimals = 18) => {
-    return ethers.BigNumber.from(Number(val).toFixed(decimals).replace(/\./g, ''));
-  }
+    let str = "" + val;
+    const decimalIndex = str.indexOf(".");
+    if(decimalIndex > -1) {
+      let decimalsStr = str.substring(decimalIndex + 1);
+      if(decimalsStr.length > decimals) throw new Error(`Cannot represent precision of ${val} with ${decimals} decimals.`);
+      while(decimalsStr.length < decimals) {
+        decimalsStr += "0";
+      }
+      return ethers.BigNumber.from(str.substring(0, decimalIndex) + decimalsStr);
+    } else {
+      for(let i = 0; i < decimals; i++) {
+        str += "0";
+      }
+      return ethers.BigNumber.from(str);
+    }
+  };
   const deployTestERC20 = async () => {
     const TestERC20 = await ethers.getContractFactory("TestERC20");
     const erc20 = await TestERC20.deploy();
@@ -295,9 +309,101 @@ describe("APIKeyManager", () => {
 
   });
 
-  describe("usedBalance(...)", function() {});
+  describe("usedBalance(...)", function() {
 
-  describe("remainingBalance(...)", function() {});
+    it("Should revert if key does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.usedBalance(keyHash)).to.be.revertedWith("APIKM: key does not exist");
+    });
+
+    it("Should return the correct proportion of the deposited balance based on time passed.", async () => {
+      const { keyManager, owner, tierPrices } = await deployAPIKeyManagerWithTiers();
+      
+      // Activate a bunch of keys:
+      const numKeys = 10;
+      const duration = 20;
+      for(let i = 0; i < numKeys; i++) {
+        const tierId = Math.floor(Math.random() * (tierPrices.length - 1)) + 1;
+        expect(tierPrices[tierId].gt(0)).to.be.true;
+        const { keyHash, tx } = await activateRandomKey(keyManager, owner, duration, tierId);
+
+        // Wait a bit of time and check if the used balance matches the expected value based on passed time:
+        let activationTimestamp = await txTimestamp(tx, keyManager.provider);
+        let estimatedTimePassed = 0;
+        do {
+          await waitSec(1);
+          estimatedTimePassed = (await keyManager.provider.getBlock(await keyManager.provider.getBlockNumber())).timestamp - activationTimestamp;
+          const usedBalance = await keyManager.usedBalance(keyHash);
+          const estimatedUsedBalance = tierPrices[tierId].mul(Math.min(estimatedTimePassed, duration));
+          expect(usedBalance).to.equal(estimatedUsedBalance);
+        } while(estimatedTimePassed <= duration);
+      }
+    });
+
+    it("Should return the entire remaining deposit if key is expired.", async () => {
+      const { keyManager, owner, tierPrices } = await deployAPIKeyManagerWithTiers();
+      
+      // Activate a new paid key:
+      const tierId = 1;
+      const duration = 3;
+      expect(tierPrices[tierId]).to.be.gt(0);
+      const totalDeposit = tierPrices[tierId].mul(duration);
+      const { keyHash } = await activateRandomKey(keyManager, owner, duration, tierId);
+
+      // Wait for key to expire:
+      await waitSec(duration + 1);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+
+      // Check used balance:
+      expect(await keyManager.usedBalance(keyHash)).to.equal(totalDeposit);
+    });
+
+  });
+
+  describe("remainingBalance(...)", function() {
+
+    it("Should revert if key does not exist.", async () => {
+      const { keyManager } = await loadFixture(deployAPIKeyManager);
+      const { keyHash } = getRandomKeySet();
+      await expect(keyManager.remainingBalance(keyHash)).to.be.revertedWith("APIKM: key does not exist");
+    });
+
+    it("Should equal the total remaining balance minus the used balance.", async () => {
+      const { keyManager, owner, tierPrices } = await deployAPIKeyManagerWithTiers();
+      
+      // Activate a new paid key:
+      const tierId = 1;
+      const duration = 10;
+      expect(tierPrices[tierId]).to.be.gt(0);
+      const totalDeposit = tierPrices[tierId].mul(duration);
+      const { keyHash } = await activateRandomKey(keyManager, owner, duration, tierId);
+
+      // Periodically check to see if the math checks out:
+      for(let i = 0; i < duration; i++) {
+        expect(await keyManager.remainingBalance(keyHash)).to.equal(totalDeposit.sub(await keyManager.usedBalance(keyHash)));
+        await waitSec(1);
+      }
+    });
+
+    it("Should return zero if key is expired.", async () => {
+      const { keyManager, owner, tierPrices } = await deployAPIKeyManagerWithTiers();
+      
+      // Activate a new paid key:
+      const tierId = 1;
+      const duration = 3;
+      expect(tierPrices[tierId]).to.be.gt(0);
+      const { keyHash } = await activateRandomKey(keyManager, owner, duration, tierId);
+
+      // Wait for key to expire:
+      await waitSec(duration + 1);
+      expect(await keyManager.isKeyActive(keyHash)).to.be.false;
+
+      // Check remaining balance:
+      expect(await keyManager.remainingBalance(keyHash)).to.equal(0);
+    });
+
+  });
 
   describe("realizeProfit(...)", function() {
 
@@ -1019,7 +1125,84 @@ describe("APIKeyManager", () => {
 
   });
   
-  describe("findUnrealizedAccounts(...)", function() {});
+  describe("findUnrealizedAccounts(...)", function() {
+
+    it("Should return empty arrays if count is zero.", async () => {
+      const { keyManager } = await deployAPIKeyManagerWithTiers();
+      const [keyHashes, amounts] = await keyManager.findUnrealizedAccounts(0, 0, false);
+      expect(keyHashes).to.have.length(0);
+      expect(amounts).to.have.length(0);
+    });
+
+    it("Should return default arrays of size <count> even if there are no keys deployed.", async () => {
+      const { keyManager } = await deployAPIKeyManagerWithTiers();
+      expect(await keyManager.numKeys()).to.equal(0);
+      const count = 9;
+      const [keyHashes, amounts] = await keyManager.findUnrealizedAccounts(9, 0, false);
+      expect(keyHashes).to.have.length(count);
+      expect(amounts).to.have.length(count);
+      for(const hash of keyHashes) {
+        expect(ethers.BigNumber.from(hash)).to.equal(0);
+      }
+      for(const amount of amounts) {
+        expect(amount).to.equal(0);
+      }
+    });
+
+    it("Should only return keys that meet the minimum unrealized amount.", async () => {
+      const { keyManager, tierPrices, owner } = await deployAPIKeyManagerWithTiers();
+      expect(await keyManager.numKeys()).to.equal(0);
+      
+      // Deploy expected keys:
+      const numKeys = 10;
+      const duration = 5;
+      const tierId = 1;
+      const tierPrice = tierPrices[tierId];
+      const expectedKeyHashes: string[] = [];
+      const expectedAmount = tierPrice.mul(duration);
+      expect(tierPrice).to.be.gt(0);
+      for(let i = 0; i < numKeys; i++) {
+        const { keyHash } = await activateRandomKey(keyManager, owner, duration, tierId);
+        expectedKeyHashes.push(keyHash);
+      }
+
+      // Wait for keys to expire:
+      await waitSec(duration + 1);
+
+      // Deploy new key that can't reach min amount:
+      const { keyHash } = await activateRandomKey(keyManager, owner, 1, tierId);
+
+      // Ensure new key is not in query results:
+      const [keyHashes, amounts] = await keyManager.findUnrealizedAccounts(await keyManager.numKeys(), expectedAmount, false);
+      expect(keyHashes).to.not.include(keyHash);
+      for(let i = 0; i < numKeys; i++) {
+        expect(keyHashes[i]).to.equal(expectedKeyHashes[i]);
+        expect(amounts[i]).to.equal(expectedAmount);
+      }
+    });
+
+    it("Should not return active keys if expiredOnly is true.", async () => {
+      const { keyManager, owner } = await deployAPIKeyManagerWithTiers();
+      expect(await keyManager.numKeys()).to.equal(0);
+      
+      // Deploy two keys with different durations:
+      const duration1 = 1;
+      const duration2 = 100;
+      const activation1 = await activateRandomKey(keyManager, owner, duration1, 1);
+      const activation2 = await activateRandomKey(keyManager, owner, duration2, 1);
+
+      // Wait for first key to expire:
+      await waitSec(duration1);
+      expect(await keyManager.isKeyActive(activation1.keyHash)).to.be.false;
+      expect(await keyManager.isKeyActive(activation2.keyHash)).to.be.true;
+
+      // Ensure the first key is in results and the second key is not in results:
+      const [keyHashes, amounts] = await keyManager.findUnrealizedAccounts(2, 0, true);
+      expect(keyHashes).to.not.include(activation2.keyHash);
+      expect(keyHashes).to.include(activation1.keyHash);
+    });
+
+  });
 
   describe("withdraw()", function() {
 

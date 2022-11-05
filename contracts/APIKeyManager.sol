@@ -189,8 +189,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
   }
 
   /**
-    @dev Calculate the used balance available for withdrawal 
-    for a given key.
+    @dev Calculates the used balance for a given key.
   */
   function usedBalance(bytes32 keyHash) public view _keyExists(keyHash) returns(uint256) {
     uint256 realizationTime = _keyDef[keyHash].realizationTime;
@@ -403,7 +402,7 @@ contract APIKeyManager is Ownable, ReentrancyGuard {
     for(uint256 id = 0; id < _numKeys && found < count; id++) {
       if(!(expiredOnly && _keyDef[_keyHash[id]].expiryTime > block.timestamp) && _keyDef[_keyHash[id]].realizationTime < _keyDef[_keyHash[id]].expiryTime) {
         uint256 unrealizedAmount = usedBalance(_keyHash[id]);
-        if(unrealizedAmount > minAmount) {
+        if(unrealizedAmount >= minAmount) {
           uint256 index = found++;
           keyHashes[index] = _keyHash[id];
           amounts[index] = unrealizedAmount;
