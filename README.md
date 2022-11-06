@@ -10,16 +10,21 @@ Install the project dependencies with `npm i`.
 
 ## Deployment
 
-Deploy the contract by adding the target network to hardhat.config.ts and running:
-```
-npx hardhat run scripts/deploy.ts
-```
-
-*The APIKeyManager.sol contract is functional, but still under development and not fully tested. Please use caution when deploying to live environments.*
+1. Add the target network to `hardhat.config.ts`
+2. Set two environment variables:
+    1. `DEPLOY_KEY` -> `0x64a...` (your deployment private key)
+    2. `ERC20` -> `0x721...` (the address of the erc20 token that the contract will accept for payment)
+3. Run `npx hardhat run --network <network name from hardhat.config.ts> srcipts/deploy.ts`
 
 ## Testing
 
 Run available tests for the contract code with the following:
 ```
 npx hardhat test
+```
+
+*or*
+
+```
+npm hardhat coverage
 ```
