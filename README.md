@@ -1,6 +1,6 @@
 # API Key Manager Contract
 
-A solidity contract that allows API users to trustlessly buy and manage their own API keys.
+This is the core component to 3PI's trustless, on-chain API key management protocol that handles API key subscriptions and active key validation.
 
 Our deployment-ready API Key Management Contract is EVM compatible and written in Solidity, with a security-first approach following industry best practices. Once deployed, this contract acts as the decentralized key validation authority all while seamlessly processing client subscription payments.
 
